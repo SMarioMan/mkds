@@ -3,6 +3,10 @@
 *.zip
 *.bin
 *.sav
+*.carc
+*.mln
+*.rom
+*.ROM
 extract/*
 !extract/README.md
 

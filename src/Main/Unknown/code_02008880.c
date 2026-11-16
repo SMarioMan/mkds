@@ -1,6 +1,7 @@
 #include "Main/Unknown/code_02008880.h"
 #include "code_02003024.h"
 #include "code_02003be0.h"
+#include "fs_file.h"
 
 #pragma thumb on
 
@@ -32,7 +33,16 @@ u32 func_02008880(FSFile *a) {
         }
         FS_SeekFile(a, v4, 0);
     } else {
-        headerPtr = (Unk02008880 *) 0x027ffe00;
+        FSFile childFile;
+        FS_InitFile(&childFile);
+        if (FS_OpenFile(&childFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0) {
+            if ((u32) FS_ReadFile(&childFile, &header, 0x60) >= 0x60) {
+                headerPtr = &header;
+            }
+            FS_CloseFile(&childFile);
+        } else {
+            headerPtr = (Unk02008880 *) 0x027ffe00;
+        }
     }
     if (headerPtr != NULL) {
         size = headerPtr->mUnk_2c + 0x268 + headerPtr->mUnk_3c;

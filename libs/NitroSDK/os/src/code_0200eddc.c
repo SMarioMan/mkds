@@ -26,6 +26,7 @@
 #include "Main/Unknown/code_0200e000.h"
 
 u32 gArena2Enabled;
+extern u8 OV003_BSS_END[];
 
 // Fills in the arena bounds on the first call only; the extra main memory arena starts out empty.
 void OS_InitArena(void) {
@@ -107,11 +108,7 @@ void *OS_GetInitArenaHi(OSArenaId id) {
 void *OS_GetInitArenaLo(OSArenaId id) {
     switch (id) {
         case OS_ARENA_MAIN:
-#ifdef version_EUR
-            return (void *) 0x21da340;
-#else
-            return (void *) 0x21da300;
-#endif
+            return (void *) OV003_BSS_END;
         case OS_ARENA_MAINEX:
             if (gArena2Enabled == 0 || (OS_GetConsoleType() & 3) == 1) {
                 return NULL;

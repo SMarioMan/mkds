@@ -71,6 +71,7 @@ sdk = [f"    SDK_OVERLAY_OV{n:03d}_ID = {n};" for n in range(lcf.count("_ID = ")
 # then reports as that overlay's; inside the block it is filed under ARM9 like its base. Absolute aliases stay outside.
 aliases = []  # (in ARM9 block, line)
 keep_sections = []
+append_data_objs = []
 main_syms = {}
 for ln in (args.config_dir / "symbols.txt").read_text().splitlines():
     if m := re.match(r"(\S+) kind:\S+ addr:(0x[0-9a-fA-F]+)", ln):
@@ -83,6 +84,8 @@ if edits.exists():
             continue
         if words[0] == "keep":
             keep_sections.append(words[1])
+        elif words[0] == "append_data":
+            append_data_objs.append(words[1])
         elif words[0] == "place":
             stub, func, unit = words[1:]
             old = f"        {stub}(.text)\n"
@@ -108,9 +111,16 @@ if edits.exists():
             raise SystemExit(f"lcf_edits: unknown edit {words[0]!r}")
 if keep_sections:
     lcf = lcf.replace("KEEP_SECTION {\n", "KEEP_SECTION {\n" + "".join(f"    {section},\n" for section in keep_sections), 1)
+if append_data_objs:
+    marker = "        . = ALIGN(32);\n        ARM9_DATA_END = .;\n"
+    if marker not in lcf:
+        raise SystemExit("lcf_edits: ARM9_DATA_END marker not found in LCF")
+    extra_data = "".join(f"        {obj}(.data)\n        {obj}(.rodata)\n" for obj in append_data_objs)
+    lcf = lcf.replace(marker, extra_data + marker, 1)
 lcf = lcf.replace("SECTIONS {\n", "SECTIONS {\n" + "\n".join(sdk) + "\n", 1)
+aliased_names = {line.split("=", 1)[0].strip() for _, line in aliases}
 inside = [line.strip() for in_main, line in aliases if in_main]
-inside += [f"{name} = {value};" for name, value in LCF_SYMBOLS.items()]
+inside += [f"{name} = {value};" for name, value in LCF_SYMBOLS.items() if name not in aliased_names]
 outside = [line for in_main, line in aliases if not in_main]
 if inside:
     end = lcf.index("    } > ARM9\n")

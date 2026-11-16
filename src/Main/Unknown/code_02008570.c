@@ -27,6 +27,7 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
     FSFile openedFile;
     BOOL result;
     BOOL openedHere;
+    BOOL usePackedChild;
     u32 remaining;
     u32 basePosition;
     DataRangeTable *rangeTable;
@@ -41,6 +42,7 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
     result = FALSE;
     if (bufferSize >= 0x164) {
         openedHere = FALSE;
+        usePackedChild = FALSE;
         remaining = bufferSize;
         v3 = (u8 *) header;
         rangeTable = NULL;
@@ -54,14 +56,25 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
             }
             seekOffset = func_02008570_inline(header);
         } else {
-            seekOffset = func_02008570_inline((Unk02008570Header *) 0x027ffe00);
-            openedHere = TRUE;
             FS_InitFile(&openedFile);
-            FS_OpenFileDirect(&openedFile, FS_FindArchive(data_0216178c, 3), 0, seekOffset + 0x88, -1);
-            activeFile = &openedFile;
-            basePosition = openedFile.mUnk_2c - openedFile.mProp.w.mUnk_04;
-            MI_CpuCopy8((const void *) 0x027ffe00, header, 0x160);
-            header->mUnk_60 |= 0x00406000;
+            if (FS_OpenFile(&openedFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0) {
+                openedHere = TRUE;
+                usePackedChild = TRUE;
+                activeFile = &openedFile;
+                basePosition = openedFile.mUnk_2c - openedFile.mProp.w.mUnk_04;
+                if (FS_ReadFile(activeFile, header, 0x160) < 0x160) {
+                    remaining = 0;
+                }
+                seekOffset = 0x160;
+            } else {
+                seekOffset = func_02008570_inline((Unk02008570Header *) 0x027ffe00);
+                openedHere = TRUE;
+                FS_OpenFileDirect(&openedFile, FS_FindArchive(data_0216178c, 3), 0, seekOffset + 0x88, -1);
+                activeFile = &openedFile;
+                basePosition = openedFile.mUnk_2c - openedFile.mProp.w.mUnk_04;
+                MI_CpuCopy8((const void *) 0x027ffe00, header, 0x160);
+                header->mUnk_60 |= 0x00406000;
+            }
         }
         if (remaining >= 0x88) {
             FS_SeekFile(activeFile, basePosition + seekOffset, 0);
@@ -89,9 +102,16 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
         }
         if (remaining >= 0x10) {
             v6 = (u32 *) v3;
-            v6[0] = 0;
-            v6[1] = header->mUnk_20 + (basePosition + activeFile->mProp.w.mUnk_04);
-            v6[2] = header->mUnk_30 + (basePosition + activeFile->mProp.w.mUnk_04);
+            if (usePackedChild != FALSE) {
+                u32 fileRomBase = basePosition + activeFile->mProp.w.mUnk_04;
+                v6[0] = 0;
+                v6[1] = fileRomBase + 0x1e8;
+                v6[2] = fileRomBase + 0x1e8 + header->mUnk_2c;
+            } else {
+                v6[0] = 0;
+                v6[1] = header->mUnk_20 + (basePosition + activeFile->mProp.w.mUnk_04);
+                v6[2] = header->mUnk_30 + (basePosition + activeFile->mProp.w.mUnk_04);
+            }
             v3 += 0x10;
             remaining -= 0x10;
         } else {
@@ -126,19 +146,23 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
         if (openedHere != FALSE) {
             FS_CloseFile(&openedFile);
             if (result != FALSE) {
-                v6 = data_02161788;
-                v14[0] = header->mUnk_20;
-                v14[1] = header->mUnk_28 - header->mUnk_20;
-                v14[2] = (u32) rangeTable->mUnk_30[1].mData - header->mUnk_20;
-                v14[3] = bufferSize;
-                CopyOrClearRange(v14, 0x4000, 0x8000, 1);
-                while (((s32 *) v6)[1] != 0) {
-                    CopyOrClearRange(v14, v6[0], v6[0] + v6[1], 0);
-                    v6 += 2;
+                if (usePackedChild != FALSE) {
+                    MI_CpuCopy8((const void *) 0x02000000, rangeTable->mUnk_30[1].mData, 0x800);
+                } else {
+                    v6 = data_02161788;
+                    v14[0] = header->mUnk_20;
+                    v14[1] = header->mUnk_28 - header->mUnk_20;
+                    v14[2] = (u32) rangeTable->mUnk_30[1].mData - header->mUnk_20;
+                    v14[3] = bufferSize;
+                    CopyOrClearRange(v14, 0x4000, 0x8000, 1);
+                    while (((s32 *) v6)[1] != 0) {
+                        CopyOrClearRange(v14, v6[0], v6[0] + v6[1], 0);
+                        v6 += 2;
+                    }
+                    v3 = rangeTable->mUnk_30[1].mData;
+                    v3 += (u32) AutoloadCallback - header->mUnk_28;
+                    *(u32 *) v3 = 0xe12fff1e;
                 }
-                v3 = rangeTable->mUnk_30[1].mData;
-                v3 += (u32) AutoloadCallback - header->mUnk_28;
-                *(u32 *) v3 = 0xe12fff1e;
             }
         }
         if (result != FALSE) {

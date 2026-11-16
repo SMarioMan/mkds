@@ -134,13 +134,14 @@ void BuildCourseList(s32 isVersus) {
     switch (gRaceSetup->mNextHeader.mCourseListMode) {
         case 1:
             if (isVersus != 0) {
+                BOOL simpleMode = (f != 0);
                 u8 p;
                 u8 q;
                 u32 n;
                 s32 e;
                 s32 c;
-                m = f != 0 ? 2 : 8;
-                t = f != 0 ? data_021540c0 : data_02154108;
+                m = 8;
+                t = data_02154108;
                 e = gRaceSetup->mNextHeader.mCourseId;
                 n = m * 4;
                 for (f = 0; f < n; f++) {
@@ -152,7 +153,7 @@ void BuildCourseList(s32 isVersus) {
                 }
                 c = 0;
                 for (f = 0; f < n; f++) {
-                    if (func_02046648(t[p]) != FALSE) {
+                    if (simpleMode || func_02046648(t[p]) != FALSE) {
                         gRaceSetup->mCourseList[c] = gCupCourseIdTable[t[p]][q];
                         c = (u8) (c + 1);
                     }
@@ -190,6 +191,7 @@ void BuildCourseList(s32 isVersus) {
             }
         case 2:
             if (isVersus != 0) {
+                BOOL simpleMode = (f != 0);
                 RandomState64 *g;
                 u32 n;
                 s32 k;
@@ -202,14 +204,14 @@ void BuildCourseList(s32 isVersus) {
                 s32 h;
                 s32 z;
                 g = GetRandomState();
-                m = f != 0 ? 2 : 8;
-                t = f != 0 ? data_021540c0 : data_02154108;
+                m = 8;
+                t = data_02154108;
                 n = m * 4;
                 c = 0;
                 for (k = 0; k < n; k++) {
                     p = k / 4;
                     q = k % 4;
-                    if (func_02046648(t[p]) != FALSE) {
+                    if (simpleMode || func_02046648(t[p]) != FALSE) {
                         gRaceSetup->mCourseList[c] = gCupCourseIdTable[t[p]][q];
                         c = (u8) (c + 1);
                     }

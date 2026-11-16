@@ -482,7 +482,7 @@ u32 GetSelectCupGridCupEnabled(u32 cupIndex) {
             }
             break;
         case 3:
-            if (cupIndex == 0 || cupIndex == 4) {
+            if (cupIndex < 8) {
                 enabled = 1;
             }
             break;

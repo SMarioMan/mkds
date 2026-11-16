@@ -1,1 +1,9 @@
 # place / alias / inner edits for the linker script, see tools/lcf_force_active.py.
+
+# The empty constructor list is addressed through its linker boundary.
+alias data_usa_02161748 ARM9_CTOR_START 0
+
+# Place new string/table literals of patched ARM9 units at ARM9_DATA_END.
+append_data code_02008570.o
+append_data code_02008880.o
+append_data code_0204bca0.o
