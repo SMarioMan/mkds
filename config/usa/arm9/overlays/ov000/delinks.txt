@@ -9,6 +9,7 @@ src/00/code_ov000_021804e0.c:
     complete
     .text       start:0x021804c0 end:0x021805e0
     .data       start:0x021b07c0 end:0x021b07e0
+    .bss        start:0x021b4c20 end:0x021b4c24
 
 // provisional: file name and boundaries
 src/00/code_02180600.c:
@@ -20,6 +21,7 @@ src/00/code_02180608.c:
     complete
     .text       start:0x021805e8 end:0x02180bd0
     .data       start:0x021b07e0 end:0x021b0a38
+    .bss        start:0x021b4c24 end:0x021b4c28
 
 // provisional: file name and boundaries
 src/00/code_02180c04.c:
@@ -166,6 +168,7 @@ src/00/code_021894e4.c:
 src/00/code_0218973c.c:
     complete
     .text       start:0x02189708 end:0x02189854
+    .rodata     start:0x021b06d0 end:0x021b0704
 
 // provisional: file name and boundaries
 src/00/code_02189888.c:
@@ -236,11 +239,13 @@ src/00/code_0218a64c.c:
 src/00/code_0218a658.c:
     complete
     .text       start:0x0218a624 end:0x0218a648
+    .data       start:0x021b2128 end:0x021b2134
 
 // provisional: file name and boundaries
 src/00/code_0218a67c.c:
     complete
     .text       start:0x0218a648 end:0x0218a6e8
+    .data       start:0x021b2134 end:0x021b2140
 
 // provisional: file name and boundaries
 src/00/code_0218a71c.c:
@@ -266,6 +271,7 @@ src/00/code_0218ab14.c:
 src/00/code_0218ab18.c:
     complete
     .text       start:0x0218aae4 end:0x0218ac7c
+    .data       start:0x021b2140 end:0x021b2148
 
 // provisional: file name and boundaries
 src/00/code_0218acb0.c:
@@ -276,6 +282,7 @@ src/00/code_0218acb0.c:
 src/00/code_0218acf4.c:
     complete
     .text       start:0x0218acc0 end:0x0218ae28
+    .data       start:0x021b2148 end:0x021b2164
 
 // provisional: file name and boundaries
 src/00/code_0218ae5c.c:
@@ -321,6 +328,7 @@ src/00/code_0218e0fc.c:
 src/00/code_0218e2a4.c:
     complete
     .text       start:0x0218e270 end:0x0218e2a8
+    .data       start:0x021b236c end:0x021b2370
 
 // provisional: file name and boundaries
 src/00/GameSpy/nonport.c:
@@ -351,6 +359,7 @@ src/00/code_0218f808.c:
 src/00/code_0218f848.c:
     complete
     .text       start:0x0218f814 end:0x0218f92c
+    .data       start:0x021b26d8 end:0x021b26fc
 
 // provisional: file name and boundaries
 src/00/GameSpy/gpiBuddy.c:
@@ -361,6 +370,7 @@ src/00/GameSpy/gpiBuddy.c:
 src/00/code_02190548.c:
     complete
     .text       start:0x02190514 end:0x021906b0
+    .data       start:0x021b2818 end:0x021b2850
 
 // provisional: file name and boundaries
 src/00/GameSpy/gpiBuffer.c:
@@ -496,6 +506,7 @@ src/00/code_02197b34.c:
 src/00/code_02197ddc.c:
     complete
     .text       start:0x02197da8 end:0x02197e58
+    .data       start:0x021b3ed0 end:0x021b3f10
 
 // provisional: file name and boundaries
 src/00/GameSpy/gt2Callback.c:
@@ -551,6 +562,7 @@ src/00/GameSpy/gt2Message.c:
 src/00/code_0219903c.c:
     complete
     .text       start:0x02199008 end:0x021995d8
+    .data       start:0x021b3f68 end:0x021b3f70
 
 // provisional: file name and boundaries
 src/00/code_0219960c.c:
@@ -680,6 +692,7 @@ src/00/code_0219b1f8.c:
 src/00/code_0219b580.c:
     complete
     .text       start:0x0219b54c end:0x0219c350
+    .bss        start:0x021b5510 end:0x021b5610
 
 // provisional: file name and boundaries
 src/00/code_0219c384.c:
@@ -705,6 +718,7 @@ src/00/code_0219cb00.c:
 src/00/code_0219cc00.c:
     complete
     .text       start:0x0219cbcc end:0x0219cf8c
+    .data       start:0x021b4028 end:0x021b4038
 
 src/00/code_0219cfc0.c:
     complete
@@ -714,11 +728,13 @@ src/00/code_0219cfc0.c:
 src/00/code_0219d128.c:
     complete
     .text       start:0x0219d0f4 end:0x0219d914
+    .data       start:0x021b4038 end:0x021b4070
 
 // provisional: file name and boundaries
 src/00/code_0219d948.c:
     complete
     .text       start:0x0219d914 end:0x0219da74
+    .data       start:0x021b4070 end:0x021b4078
 
 // provisional: file name and boundaries
 src/00/code_0219daa8.c:
@@ -754,11 +770,14 @@ src/00/code_021a2cac.c:
 src/00/code_021a2ccc.c:
     complete
     .text       start:0x021a2c98 end:0x021a3230
+    .data       start:0x021b41b0 end:0x021b41b4
 
 // provisional: file name and boundaries
 src/00/code_021a3264.c:
     complete
     .text       start:0x021a3230 end:0x021a3634
+    .data       start:0x021b41b4 end:0x021b41c0
+    .bss        start:0x021b5d94 end:0x021b5dac
 
 // provisional: file name and boundaries
 src/00/code_021a3668.c:
@@ -789,6 +808,8 @@ src/00/code_021a3758.c:
 src/00/code_021a3760.c:
     complete
     .text       start:0x021a372c end:0x021a39e4
+    .data       start:0x021b41c0 end:0x021b422c
+    .bss        start:0x021b5db4 end:0x021b5db8
 
 // provisional: file name and boundaries
 src/00/code_021a3a18.c:
@@ -804,6 +825,7 @@ src/00/code_021a4b84.c:
 src/00/code_021a4b98.c:
     complete
     .text       start:0x021a4b64 end:0x021a6638
+    .bss        start:0x021b5f10 end:0x021b5f14
 
 // provisional: file name and boundaries
 src/00/code_021a666c.c:
@@ -829,6 +851,7 @@ src/00/code_021a6934.c:
 src/00/code_021a6c08.c:
     complete
     .text       start:0x021a6bd4 end:0x021a6cb0
+    .bss        start:0x021b5f40 end:0x021b5f54
 
 // provisional: file name and boundaries
 src/00/code_021a6ce4.c:
@@ -954,6 +977,7 @@ src/00/code_021acfd8.c:
 src/00/code_021ad018.c:
     complete
     .text       start:0x021acfe4 end:0x021ad338
+    .bss        start:0x021b6360 end:0x021b6364
 
 // provisional: file name and boundaries
 src/00/code_021ad36c.c:

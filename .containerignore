@@ -1,0 +1,11 @@
+.git
+build
+extract/*
+!extract/README.md
+*.nds
+*.bin
+*.sav
+tools/bin
+tools/mwccarm
+reports/screenshots
+reports/logs
