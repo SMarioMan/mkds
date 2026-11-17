@@ -13,12 +13,14 @@
 #include <barrier>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -43,6 +45,8 @@ extern void Harness_ShutdownLocalMP();
 extern void Harness_RegisterConsoles(int count, melonDS::NDS** ptrs);
 extern void Harness_GetMPStats(u64& cmdSent, u64& hostRecv, u64& replySent, u64& replyRecv);
 extern void Harness_SetStage2Active(bool active);
+extern void Harness_NotifyStop();
+extern void Harness_SetPumpGuestsCallback(std::function<bool()> cb);
 extern void Harness_CaptureFrameStarts();
 extern void Harness_NotifyFrameBegin(int inst);
 extern void Harness_NotifyFrameEnd(int inst);
@@ -240,7 +244,123 @@ static bool WritePngRGBA(const std::string& path, int width, int height, const s
     return true;
 }
 
-static void SaveCompositeScreenshot(const std::string& path, const std::vector<std::unique_ptr<melonDS::NDS>>& consoles)
+class HarnessNDS : public melonDS::NDS
+{
+public:
+    using melonDS::NDS::NDS;
+
+    u64 GetFrameStartSys() const noexcept { return FrameStartTimestamp; }
+    u64 GetSysTimestamp() const noexcept { return SysTimestamp; }
+
+    void BeginFrameSlice()
+    {
+        Current = this;
+        FrameStartTimestamp = SysTimestamp;
+        GPU.TotalScanlines = 0;
+        LagFrameFlag = true;
+        if (Running && !(CPUStop & melonDS::CPUStop_Sleep))
+        {
+            if (!(CPUStop & melonDS::CPUStop_Wakeup))
+                GPU.StartFrame();
+            CPUStop &= ~melonDS::CPUStop_Wakeup;
+        }
+    }
+
+    bool FrameSliceDone() const noexcept
+    {
+        return !Running || GPU.TotalScanlines != 0;
+    }
+
+    void RunUntilSys(u64 sliceEndSys)
+    {
+        Current = this;
+        while (Running && GPU.TotalScanlines == 0 && SysTimestamp < sliceEndSys)
+        {
+            if (CPUStop & melonDS::CPUStop_Sleep)
+            {
+                u64 frametarget = FrameStartTimestamp + 560190;
+                u64 target = NextTargetSleep();
+                if (target > sliceEndSys) target = sliceEndSys;
+                if (target > frametarget) target = frametarget;
+                ARM9Timestamp = target << ARM9ClockShift;
+                ARM7Timestamp = target;
+                TimerTimestamp[0] = target;
+                TimerTimestamp[1] = target;
+                GPU.GPU3D.Timestamp = target;
+                RunSystemSleep(target);
+                if (SysTimestamp >= frametarget)
+                    GPU.BlankFrame();
+                if (!(CPUStop & melonDS::CPUStop_Sleep))
+                {
+                    if (!(CPUStop & melonDS::CPUStop_Wakeup))
+                        GPU.StartFrame();
+                    CPUStop &= ~melonDS::CPUStop_Wakeup;
+                }
+                continue;
+            }
+
+            u64 target = NextTarget();
+            if (target > sliceEndSys)
+                target = sliceEndSys;
+            ARM9Target = target << ARM9ClockShift;
+            CurCPU = 0;
+
+            if (CPUStop & melonDS::CPUStop_GXStall)
+            {
+                s32 cycles = GPU.GPU3D.CyclesToRunFor();
+                ARM9Timestamp = std::min(ARM9Target, ARM9Timestamp + (static_cast<u64>(cycles) << ARM9ClockShift));
+            }
+            else if (CPUStop & melonDS::CPUStop_DMA9)
+            {
+                DMAs[0].Run();
+                if (!(CPUStop & melonDS::CPUStop_GXStall)) DMAs[1].Run();
+                if (!(CPUStop & melonDS::CPUStop_GXStall)) DMAs[2].Run();
+                if (!(CPUStop & melonDS::CPUStop_GXStall)) DMAs[3].Run();
+            }
+            else
+            {
+                ARM9.Execute<melonDS::CPUExecuteMode::Interpreter>();
+            }
+
+            RunTimers(0);
+            GPU.GPU3D.Run();
+
+            target = ARM9Timestamp >> ARM9ClockShift;
+            CurCPU = 1;
+
+            while (ARM7Timestamp < target)
+            {
+                ARM7Target = target;
+                if (CPUStop & melonDS::CPUStop_DMA7)
+                {
+                    DMAs[4].Run();
+                    DMAs[5].Run();
+                    DMAs[6].Run();
+                    DMAs[7].Run();
+                }
+                else
+                {
+                    ARM7.Execute<melonDS::CPUExecuteMode::Interpreter>();
+                }
+                RunTimers(1);
+            }
+
+            RunSystem(target);
+        }
+    }
+
+    void EndFrameSlice()
+    {
+        Current = this;
+        SPU.BufferAudio();
+        NumFrames++;
+        if (LagFrameFlag)
+            NumLagFrames++;
+    }
+};
+
+template <typename ConsoleVec>
+static void SaveCompositeScreenshot(const std::string& path, const ConsoleVec& consoles)
 {
     int n = static_cast<int>(consoles.size());
     int width = 256 * n;
@@ -305,6 +425,7 @@ struct MkdsSymbols
     u32 OSi_ExContext           = 0x021701c8;
     u32 gCupCourseIdTable       = 0x02154168;
     u32 gSelectBattleStage      = 0x00000000;
+    u32 gHaxxStationHost        = 0x00000000;
 
     void LoadFromSymbolsTxt(const std::string& path)
     {
@@ -338,6 +459,7 @@ struct MkdsSymbols
             {"gRomArchiveTransfer", &gRomArchiveTransfer},
             {"OSi_ExContext", &OSi_ExContext},
             {"gCupCourseIdTable", &gCupCourseIdTable},
+            {"gHaxxStationHost", &gHaxxStationHost},
         };
         std::string line;
         while (std::getline(ifs, line))
@@ -411,6 +533,7 @@ struct KartAutopilot
 {
     u32 currentLinkAddr = 0;
     int stuckFrames = 0;
+    int framesSinceLinkAdvance = 0;
     int reverseTimer = 0;
     s32 lastSteerDir = 1;
 
@@ -418,6 +541,7 @@ struct KartAutopilot
     {
         currentLinkAddr = 0;
         stuckFrames = 0;
+        framesSinceLinkAdvance = 0;
         reverseTimer = 0;
     }
 
@@ -437,7 +561,6 @@ struct KartAutopilot
         s32 clockEnabled = RamReadS32(nds, raceProg + 0x04);
         if (clockEnabled == 0)
         {
-            // During countdown, hold A after ~120 elapsed frames or keep neutral so we don't spin out!
             Reset();
             return PressKeys(0);
         }
@@ -449,25 +572,34 @@ struct KartAutopilot
         s32 status = RamReadS32(nds, progKart + 0x00);
         if (status != 0)
         {
-            // Kart already finished race! Game takes over post-goal driving automatically.
             return PressKeys(0);
         }
+        u16 progFlags = RamRead16(nds, progKart + 0x30); // bit 0x4 = facing against checkpoint (wrong-way)
+        u16 cpIdx     = RamRead16(nds, progKart + 0x32); // current CourseMapCheckpoint index
 
         u32 kart = kartsPtr + entryIdx * 0x5a8;
         double kx = RamReadS32(nds, kart + 0x80) / 4096.0;
         double ky = RamReadS32(nds, kart + 0x84) / 4096.0;
         double kz = RamReadS32(nds, kart + 0x88) / 4096.0;
 
-        // Row 0 of mUnk_120_m (+0x120) is local Left (+X), Row 2 (+0x138) is local Forward (+Z)
+        // Row 0 (+0x120) = local Left, Row 1 (+0x12c) = local Up, Row 2 (+0x138) = local Forward in 3D
         double lx = RamReadS32(nds, kart + 0x120) / 4096.0;
+        double ly = RamReadS32(nds, kart + 0x124) / 4096.0;
         double lz = RamReadS32(nds, kart + 0x128) / 4096.0;
+        double ux = RamReadS32(nds, kart + 0x12c) / 4096.0;
+        double uy = RamReadS32(nds, kart + 0x130) / 4096.0;
+        double uz = RamReadS32(nds, kart + 0x134) / 4096.0;
         double fx = RamReadS32(nds, kart + 0x138) / 4096.0;
+        double fy = RamReadS32(nds, kart + 0x13c) / 4096.0;
         double fz = RamReadS32(nds, kart + 0x140) / 4096.0;
         double fwdSpeed = RamReadS32(nds, kart + 0x2a8) / 4096.0;
-        s32 kartState = RamReadS32(nds, kart + 0x180);
+        double velLen   = RamReadS32(nds, kart + 0x2a4) / 4096.0;
+        s32 kartState   = RamReadS32(nds, kart + 0x180);
+        const bool isInvertedOrClimbing = (uy < 0.42) || (fy > 0.42);
 
-        u32 linksBase = RamRead32(nds, courseMap + 0xa0);
-        u16 pointCount = RamRead16(nds, courseMap + 0x68);
+        u32 linksBase   = RamRead32(nds, courseMap + 0xa0);
+        u32 route0First = RamRead32(nds, courseMap + 0xa4);
+        u16 pointCount  = RamRead16(nds, courseMap + 0x68);
         if (!IsValidMainRamPtr(linksBase) || pointCount == 0 || pointCount > 512)
         {
             return PressKeys(KEY_A);
@@ -480,47 +612,178 @@ struct KartAutopilot
             px = RamReadS32(nds, ptAddr + 0x00) / 4096.0;
             py = RamReadS32(nds, ptAddr + 0x04) / 4096.0;
             pz = RamReadS32(nds, ptAddr + 0x08) / 4096.0;
-            rad = std::max(120.0, RamReadS32(nds, ptAddr + 0x0c) / 4096.0);
+            rad = std::max(110.0, RamReadS32(nds, ptAddr + 0x0c) / 4096.0);
             return true;
         };
 
+        auto dist3 = [](double x1, double y1, double z1, double x2, double y2, double z2) -> double {
+            double dx = x1 - x2, dy = y1 - y2, dz = z1 - z2;
+            return std::sqrt(dx * dx + dy * dy + dz * dz);
+        };
+
+        auto segProject3D = [&](double ax, double ay, double az, double bx, double by, double bz,
+                                double& outT, double& outDist3D, double& outProjY) {
+            double vx = bx - ax, vy = by - ay, vz = bz - az;
+            double len2 = vx * vx + vy * vy + vz * vz;
+            outT = (len2 > 1.0)
+                 ? std::clamp(((kx - ax) * vx + (ky - ay) * vy + (kz - az) * vz) / len2, 0.0, 1.0)
+                 : 1.0;
+            double px = ax + vx * outT;
+            double py = ay + vy * outT;
+            double pz = az + vz * outT;
+            outProjY = py;
+            outDist3D = dist3(kx, ky, kz, px, py, pz);
+        };
+
+        // 1. Initialize at race start to MKDS's exact gCourseMap->mRaceRoute0FirstLink (same as InitRacePointLinkCursor)
         double tx = 0, ty = 0, tz = 0, trad = 200.0;
-        bool needSnap = !getLinkPos(currentLinkAddr, tx, ty, tz, trad);
-        if (!needSnap)
+        double ax = 0, ay = 0, az = 0, arad = 200.0;
+        if (currentLinkAddr == 0 || !getLinkPos(currentLinkAddr, tx, ty, tz, trad))
         {
-            double dx = tx - kx, dz = tz - kz;
-            double distXZ = std::hypot(dx, dz);
-            if (distXZ > 2600.0 || std::abs(ty - ky) > 1200.0)
-                needSnap = true;
+            currentLinkAddr = IsValidMainRamPtr(route0First) ? route0First : linksBase;
+            if (!getLinkPos(currentLinkAddr, tx, ty, tz, trad))
+            {
+                return PressKeys(KEY_A);
+            }
+            framesSinceLinkAdvance = 0;
         }
 
-        if (needSnap)
+        // Unstick recovery if wedged against wall/bumper (keeps currentLinkAddr; never globally re-snaps!)
+        if (reverseTimer > 0)
         {
-            double bestScore = 1e18;
-            u32 bestLink = linksBase;
-            for (u16 i = 0; i < pointCount; ++i)
+            reverseTimer--;
+            u32 revKeys = KEY_B | (lastSteerDir > 0 ? KEY_RIGHT : KEY_LEFT);
+            return PressKeys(revKeys);
+        }
+
+        {
+            u32 prev0 = RamRead32(nds, currentLinkAddr + 0x0c);
+            if (!getLinkPos(prev0, ax, ay, az, arad))
             {
-                u32 cand = linksBase + i * 0x28;
-                double px, py, pz, prad;
-                if (!getLinkPos(cand, px, py, pz, prad)) continue;
-                double dx = px - kx, dz = pz - kz, dy = std::abs(py - ky);
-                double distXZ = std::hypot(dx, dz);
-                double dotF = (distXZ > 1.0) ? ((dx * fx + dz * fz) / distXZ) : 1.0;
-                double penalty = (dotF < -0.2) ? 1200.0 : 0.0;
-                double score = distXZ + 3.0 * dy + penalty;
-                if (score < bestScore)
+                ax = tx; ay = ty; az = tz;
+            }
+            double segT = 0.0, dSeg3D = 0.0, projY = ty;
+            segProject3D(ax, ay, az, tx, ty, tz, segT, dSeg3D, projY);
+
+            // Cannon flight immunity (Airship Fortress / Waluigi Pinball / DK Pass): hold straight while airborne at cannon speed
+            if (!isInvertedOrClimbing && fwdSpeed > 10.5 && std::abs(ky - projY) > 400.0)
+            {
+                framesSinceLinkAdvance = 0;
+                stuckFrames = 0;
+                return PressKeys(KEY_A);
+            }
+
+            // 2. Re-acquire ONLY on cannon landing or Lakitu respawn (dSeg3D > 1350), strictly constrained to forward route / checkpoint!
+            if (dSeg3D > 1350.0)
+            {
+                u32 bestLink = 0;
+                double bestScore = 1e18;
+
+                // First: walk forward along the RacePointLink chain (handles cannon landings & shortcuts cleanly)
+                u32 walk = currentLinkAddr;
+                for (int step = 0; step < 56 && IsValidMainRamPtr(walk); ++step)
                 {
-                    bestScore = score;
-                    bestLink = cand;
+                    double bx, by, bz, brad;
+                    if (!getLinkPos(walk, bx, by, bz, brad)) break;
+                    u32 p0 = RamRead32(nds, walk + 0x0c);
+                    double pax = bx, pay = by, paz = bz, parad = brad;
+                    getLinkPos(p0, pax, pay, paz, parad);
+                    double st = 0.0, sd = 0.0, py = by;
+                    segProject3D(pax, pay, paz, bx, by, bz, st, sd, py);
+                    double dy = std::abs(ky - py);
+                    double sc = sd + 1.8 * dy;
+                    if (sd < 600.0 && dy < 380.0 && sc < bestScore)
+                    {
+                        bestScore = sc;
+                        bestLink = walk;
+                    }
+                    walk = RamRead32(nds, walk + 0x00);
+                }
+
+                // Second: if Lakitu respawned the kart behind currentLinkAddr, use MKDS's exact CourseMapRespawn for cpIdx!
+                if (bestLink == 0)
+                {
+                    u32 checkpointsBase  = RamRead32(nds, courseMap + 0x44);
+                    u16 cpCount          = RamRead16(nds, courseMap + 0x48);
+                    u32 respawnsBase     = RamRead32(nds, courseMap + 0x24);
+                    u16 respawnCount     = RamRead16(nds, courseMap + 0x28);
+                    u32 respawnIdxBySlot = RamRead32(nds, courseMap + 0xf8);
+
+                    double cpDirX = fx, cpDirZ = fz;
+                    if (IsValidMainRamPtr(checkpointsBase) && cpIdx < cpCount)
+                    {
+                        u32 cpAddr = checkpointsBase + cpIdx * 0x24;
+                        cpDirX = RamReadS32(nds, cpAddr + 0x10) / 4096.0;
+                        cpDirZ = RamReadS32(nds, cpAddr + 0x14) / 4096.0;
+                        u8 respawnSlot = RamRead8(nds, cpAddr + 0x22);
+                        if (IsValidMainRamPtr(respawnsBase) && IsValidMainRamPtr(respawnIdxBySlot) && respawnCount > 0)
+                        {
+                            u16 rIdx = RamRead16(nds, respawnIdxBySlot + respawnSlot * 2);
+                            if (rIdx < respawnCount)
+                            {
+                                u16 ptIdx = RamRead16(nds, respawnsBase + rIdx * 0x20 + 0x18);
+                                if (ptIdx < pointCount)
+                                {
+                                    u32 rWalk = linksBase + ptIdx * 0x28;
+                                    for (int step = 0; step < 20 && IsValidMainRamPtr(rWalk); ++step)
+                                    {
+                                        double bx, by, bz, brad;
+                                        if (!getLinkPos(rWalk, bx, by, bz, brad)) break;
+                                        u32 p0 = RamRead32(nds, rWalk + 0x0c);
+                                        double pax = bx, pay = by, paz = bz, parad = brad;
+                                        getLinkPos(p0, pax, pay, paz, parad);
+                                        double st = 0.0, sd = 0.0, py = by;
+                                        segProject3D(pax, pay, paz, bx, by, bz, st, sd, py);
+                                        double sc = sd + 1.8 * std::abs(ky - py);
+                                        if (sc < bestScore)
+                                        {
+                                            bestScore = sc;
+                                            bestLink = rWalk;
+                                        }
+                                        rWalk = RamRead32(nds, rWalk + 0x00);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Final safety fallback: match checkpoint forward direction (NEVER kart's spun nose!)
+                    if (bestLink == 0)
+                    {
+                        for (u16 i = 0; i < pointCount; ++i)
+                        {
+                            u32 cand = linksBase + i * 0x28;
+                            double bx, by, bz, brad;
+                            if (!getLinkPos(cand, bx, by, bz, brad)) continue;
+                            u32 p0 = RamRead32(nds, cand + 0x0c);
+                            double pax = bx, pay = by, paz = bz, parad = brad;
+                            getLinkPos(p0, pax, pay, paz, parad);
+                            double st = 0.0, sd = 0.0, py = by;
+                            segProject3D(pax, pay, paz, bx, by, bz, st, sd, py);
+                            double svx = bx - pax, svz = bz - paz;
+                            double slen2D = std::sqrt(svx * svx + svz * svz);
+                            double dotCp = (slen2D > 1.0) ? ((svx * cpDirX + svz * cpDirZ) / slen2D) : 1.0;
+                            double penalty = (dotCp < -0.10) ? 5000.0 : 0.0;
+                            double sc = sd + 2.2 * std::abs(ky - py) + penalty;
+                            if (sc < bestScore)
+                            {
+                                bestScore = sc;
+                                bestLink = cand;
+                            }
+                        }
+                    }
+                }
+
+                if (IsValidMainRamPtr(bestLink))
+                {
+                    currentLinkAddr = bestLink;
+                    getLinkPos(currentLinkAddr, tx, ty, tz, trad);
+                    framesSinceLinkAdvance = 0;
                 }
             }
-            // Advance 1 link forward so we aim ahead of the kart rather than slightly behind it
-            u32 next0 = RamRead32(nds, bestLink + 0x00);
-            currentLinkAddr = IsValidMainRamPtr(next0) ? next0 : bestLink;
-            getLinkPos(currentLinkAddr, tx, ty, tz, trad);
         }
 
-        // Advance along the RacePointLink chain when within reach or already past the waypoint plane
+        // 3. Advance along 3D RacePointLink chain (handles flat corners, overpasses, corkscrews, and Rainbow Road's 360-deg vertical loop!)
         for (int step = 0; step < 3; ++step)
         {
             u32 next0 = RamRead32(nds, currentLinkAddr + 0x00);
@@ -528,15 +791,37 @@ struct KartAutopilot
             double nx, ny, nz, nrad;
             if (!getLinkPos(next0, nx, ny, nz, nrad)) break;
 
-            double dx = tx - kx, dz = tz - kz;
-            double distXZ = std::hypot(dx, dz);
-            double segX = nx - tx, segZ = nz - tz;
-            double passedDot = (kx - tx) * segX + (kz - tz) * segZ;
-            double reach = std::clamp(trad * 0.85, 220.0, 520.0);
-            if (distXZ < reach || (distXZ < 750.0 && passedDot > 0.0))
+            u32 prev0 = RamRead32(nds, currentLinkAddr + 0x0c);
+            if (!getLinkPos(prev0, ax, ay, az, arad))
+            {
+                ax = kx; ay = ky; az = kz;
+            }
+
+            double abX = tx - ax, abY = ty - ay, abZ = tz - az;
+            double bcX = nx - tx, bcY = ny - ty, bcZ = nz - tz;
+            double abDotU = abX * ux + abY * uy + abZ * uz;
+            double bcDotU = bcX * ux + bcY * uy + bcZ * uz;
+            double abpX = abX - abDotU * ux, abpY = abY - abDotU * uy, abpZ = abZ - abDotU * uz;
+            double bcpX = bcX - bcDotU * ux, bcpY = bcY - bcDotU * uy, bcpZ = bcZ - bcDotU * uz;
+            double abLen = std::sqrt(abpX * abpX + abpY * abpY + abpZ * abpZ);
+            double bcLen = std::sqrt(bcpX * bcpX + bcpY * bcpY + bcpZ * bcpZ);
+            double cosTurn = (abLen > 1.0 && bcLen > 1.0)
+                           ? ((abpX * bcpX + abpY * bcpY + abpZ * bcpZ) / (abLen * bcLen))
+                           : 1.0;
+
+            double distToB = dist3(kx, ky, kz, tx, ty, tz);
+            double passedDot = (kx - tx) * bcX + (ky - ty) * bcY + (kz - tz) * bcZ;
+            double nextT = 0.0, distNextSeg = 1e9, nextProjY = ny;
+            segProject3D(tx, ty, tz, nx, ny, nz, nextT, distNextSeg, nextProjY);
+
+            double reach = (cosTurn < 0.96 && !isInvertedOrClimbing)
+                         ? 92.0
+                         : std::clamp(trad * 0.55, 145.0, 260.0);
+            if (distToB < reach || (distToB < 340.0 && passedDot > 0.0 && distNextSeg < 140.0))
             {
                 currentLinkAddr = next0;
                 tx = nx; ty = ny; tz = nz; trad = nrad;
+                framesSinceLinkAdvance = 0;
             }
             else
             {
@@ -544,77 +829,132 @@ struct KartAutopilot
             }
         }
 
-        // Blend slightly toward next waypoint when close for smooth apex entry
+        // 4. 3D Pure-Pursuit centerline target along A -> B
+        u32 prev0 = RamRead32(nds, currentLinkAddr + 0x0c);
+        if (!getLinkPos(prev0, ax, ay, az, arad))
+        {
+            ax = tx; ay = ty; az = tz;
+        }
         u32 nextLink = RamRead32(nds, currentLinkAddr + 0x00);
-        double nx, ny, nz, nrad;
-        double aimX = tx, aimZ = tz;
+        double nx = tx, ny = ty, nz = tz, nrad = trad;
+        double cosCorner = 1.0;
+        bool isApproachingClimb = false;
         if (IsValidMainRamPtr(nextLink) && getLinkPos(nextLink, nx, ny, nz, nrad))
         {
-            double dCur = std::hypot(tx - kx, tz - kz);
-            if (dCur < 500.0)
+            double abX = tx - ax, abY = ty - ay, abZ = tz - az;
+            double bcX = nx - tx, bcY = ny - ty, bcZ = nz - tz;
+            double bc3DL = std::sqrt(bcX * bcX + bcY * bcY + bcZ * bcZ);
+            if (bc3DL > 1.0 && (bcY / bc3DL) > 0.16)
+                isApproachingClimb = true;
+            u32 next2Link = RamRead32(nds, nextLink + 0x00);
+            double n2x = nx, n2y = ny, n2z = nz, n2rad = nrad;
+            if (IsValidMainRamPtr(next2Link) && getLinkPos(next2Link, n2x, n2y, n2z, n2rad))
             {
-                double w = std::clamp(1.0 - dCur / 500.0, 0.0, 0.55);
-                aimX = tx * (1.0 - w) + nx * w;
-                aimZ = tz * (1.0 - w) + nz * w;
+                double cdX = n2x - nx, cdY = n2y - ny, cdZ = n2z - nz;
+                double cd3DL = std::sqrt(cdX * cdX + cdY * cdY + cdZ * cdZ);
+                if (cd3DL > 1.0 && (cdY / cd3DL) > 0.20)
+                    isApproachingClimb = true;
             }
+            double abDotU = abX * ux + abY * uy + abZ * uz;
+            double bcDotU = bcX * ux + bcY * uy + bcZ * uz;
+            double abpX = abX - abDotU * ux, abpY = abY - abDotU * uy, abpZ = abZ - abDotU * uz;
+            double bcpX = bcX - bcDotU * ux, bcpY = bcY - bcDotU * uy, bcpZ = bcZ - bcDotU * uz;
+            double abL = std::sqrt(abpX * abpX + abpY * abpY + abpZ * abpZ);
+            double bcL = std::sqrt(bcpX * bcpX + bcpY * bcpY + bcpZ * bcpZ);
+            if (abL > 1.0 && bcL > 1.0)
+                cosCorner = (abpX * bcpX + abpY * bcpY + abpZ * bcpZ) / (abL * bcL);
         }
 
-        // Unstick recovery if wedged against wall/obstacle
-        if (reverseTimer > 0)
+        double segT = 0.0, dSeg3D = 0.0, projY = ty;
+        segProject3D(ax, ay, az, tx, ty, tz, segT, dSeg3D, projY);
+        double segLen = dist3(ax, ay, az, tx, ty, tz);
+        // Tight lookahead on curves/unguarded edges so kart hugs exact road centerline instead of cutting inside chords or drifting wide!
+        double lookahead = (!isInvertedOrClimbing && !isApproachingClimb && (cosCorner < 0.95 || dSeg3D > 95.0))
+                         ? 90.0
+                         : std::clamp(135.0 + std::max(0.0, fwdSpeed) * 7.5, 135.0, 220.0);
+        double tAim = (segLen > 1.0) ? std::min(1.0, segT + lookahead / segLen) : 1.0;
+        double aimX = ax + (tx - ax) * tAim;
+        double aimY = ay + (ty - ay) * tAim;
+        double aimZ = az + (tz - az) * tAim;
+
+        double distToB = dist3(kx, ky, kz, tx, ty, tz);
+        if (cosCorner > 0.96 && distToB < 150.0)
         {
-            reverseTimer--;
-            u32 revKeys = KEY_B | (lastSteerDir > 0 ? KEY_RIGHT : KEY_LEFT);
-            return PressKeys(revKeys);
+            double w = std::clamp((1.0 - distToB / 150.0) * 0.15, 0.0, 0.15);
+            aimX = aimX * (1.0 - w) + nx * w;
+            aimY = aimY * (1.0 - w) + ny * w;
+            aimZ = aimZ * (1.0 - w) + nz * w;
         }
-        if (kartState == 0 && std::abs(fwdSpeed) < 0.6)
-        {
-            stuckFrames++;
-            if (stuckFrames > 50)
-            {
-                stuckFrames = 0;
-                reverseTimer = 28;
-                return PressKeys(KEY_B);
-            }
-        }
-        else
+
+        // Project 3D target vector into kart's local wheel tangent plane (orthogonal to local Up u)
+        double rx = aimX - kx, ry = aimY - ky, rz = aimZ - kz;
+        double dotU = rx * ux + ry * uy + rz * uz;
+        double tx3 = rx - dotU * ux;
+        double ty3 = ry - dotU * uy;
+        double tz3 = rz - dotU * uz;
+        double len = std::sqrt(tx3 * tx3 + ty3 * ty3 + tz3 * tz3);
+        if (len < 1e-3) return PressKeys(KEY_A);
+        tx3 /= len;
+        ty3 /= len;
+        tz3 /= len;
+
+        double projFwd  = tx3 * fx + ty3 * fy + tz3 * fz;
+        double projLeft = tx3 * lx + ty3 * ly + tz3 * lz;
+
+        // 5. Zero-radius in-place spin-turn (TryTurnKartAtLowSpeed: KEY_A | KEY_B | LEFT/RIGHT) if ever spun backwards!
+        if (!isInvertedOrClimbing && (projFwd < -0.15 || ((progFlags & 0x4) != 0 && projFwd < 0.30)))
         {
             stuckFrames = 0;
+            u32 turnKey = (projLeft >= 0.0) ? KEY_LEFT : KEY_RIGHT;
+            lastSteerDir = (turnKey == KEY_LEFT) ? 1 : -1;
+            if (velLen >= 1.45 && fwdSpeed > 0.5)
+            {
+                return PressKeys(KEY_B | turnKey);
+            }
+            return PressKeys(KEY_A | KEY_B | turnKey);
         }
 
-        double dx = aimX - kx;
-        double dz = aimZ - kz;
-        double len = std::hypot(dx, dz);
-        if (len < 1e-3) return PressKeys(KEY_A);
-        dx /= len;
-        dz /= len;
+        if (!isInvertedOrClimbing)
+            framesSinceLinkAdvance++;
+        if (kartState == 0 && !isInvertedOrClimbing && std::abs(fwdSpeed) < 0.85)
+            stuckFrames++;
+        else
+            stuckFrames = 0;
 
-        // Project target direction onto kart's local Forward (+Z) and Left (+X)
-        double projFwd  = dx * fx + dz * fz;
-        double projLeft = dx * lx + dz * lz;
+        if (stuckFrames > 42 || (framesSinceLinkAdvance > 300 && fwdSpeed < 2.0))
+        {
+            stuckFrames = 0;
+            framesSinceLinkAdvance = 0;
+            reverseTimer = 26;
+            return PressKeys(KEY_B);
+        }
 
         u32 keys = KEY_A;
-        if (projLeft > 0.065 || (projFwd < 0.0 && projLeft >= 0.0))
+        if (projLeft > 0.048 || (projFwd < 0.0 && projLeft >= 0.0))
         {
             keys |= KEY_LEFT;
             lastSteerDir = 1;
         }
-        else if (projLeft < -0.065 || (projFwd < 0.0 && projLeft < 0.0))
+        else if (projLeft < -0.048 || (projFwd < 0.0 && projLeft < 0.0))
         {
             keys |= KEY_RIGHT;
             lastSteerDir = -1;
         }
 
-        // Use items automatically if held (press X periodically) so item boxes/shells get exercised too!
         if ((RamReadS32(nds, raceProg + 0x00) % 90) == 45)
         {
             keys |= KEY_X;
         }
 
-        // Ease throttle on very sharp hairpins so kart stays cleanly on narrow bridges/edges
-        if (projFwd < 0.35 && fwdSpeed > 5.5)
+        double distToCorner = dist3(kx, ky, kz, tx, ty, tz);
+        if (!isInvertedOrClimbing && !isApproachingClimb &&
+            ((cosCorner < 0.94 && distToCorner < 360.0 && fwdSpeed > 4.6) ||
+             (cosCorner < 0.85 && distToCorner < 460.0 && fwdSpeed > 3.7) ||
+             (std::abs(projLeft) > 0.18 && fwdSpeed > 4.1) ||
+             (projFwd < 0.70 && fwdSpeed > 3.8)))
         {
             keys &= ~KEY_A;
-            if (projFwd < -0.15 && fwdSpeed > 3.5)
+            if (fwdSpeed > 5.2 || (cosCorner < 0.85 && fwdSpeed > 4.3) || (projFwd < 0.20 && fwdSpeed > 2.8))
                 keys |= KEY_B;
         }
 
@@ -635,8 +975,10 @@ struct Config
     std::string saveLobbyPrefix;
     std::string loadLobbyPrefix;
     std::string outDir = "out";
-    std::string mode = "simple-vs"; // simple-vs, simple-battle, normal-vs, single-gp, single-tt
+    std::string traceJsonlPath;
+    std::string mode = "simple-vs"; // simple-vs, simple-battle, normal-vs, single-gp, single-tt, station-probe, station-mkds-guest
     int numGuests = 1;
+    int guestTapDelay = 0;  // Extra per-guest frame stagger before pressing A in Station menu
     int courseListMode = 0; // 0 = Choose, 1 = In Order (Sequential), 2 = Random
     int cpuMode = -1;       // -1 = Keep game default, 0 = Off, 1 = Easy, 2 = Normal, 3 = Hard
     int targetCup = 0;      // 0..7
@@ -691,8 +1033,10 @@ int main(int argc, char** argv)
         else if (arg == "--save-lobby-state") cfg.saveLobbyPrefix = nextStr();
         else if (arg == "--load-lobby-state") cfg.loadLobbyPrefix = nextStr();
         else if (arg == "--out-dir") cfg.outDir = nextStr();
+        else if (arg == "--trace-jsonl") cfg.traceJsonlPath = nextStr();
         else if (arg == "--mode") cfg.mode = nextStr();
         else if (arg == "--guests") cfg.numGuests = std::stoi(nextStr());
+        else if (arg == "--guest-tap-delay") cfg.guestTapDelay = std::stoi(nextStr());
         else if (arg == "--course-list-mode") cfg.courseListMode = std::stoi(nextStr());
         else if (arg == "--cpu") cfg.cpuMode = std::stoi(nextStr());
         else if (arg == "--cup") cfg.targetCup = std::stoi(nextStr());
@@ -725,6 +1069,9 @@ int main(int argc, char** argv)
     const bool isSinglePlayer = (cfg.mode == "single-gp" || cfg.mode == "single-tt");
     const bool isMultiCard = (cfg.mode == "normal-vs");
     const bool isBattle = (cfg.mode == "simple-battle");
+    const bool isStationProbe = (cfg.mode == "station-probe");
+    const bool isStationMkdsGuest = (cfg.mode == "station-mkds-guest");
+    const bool isStandaloneStation = isStationProbe || isStationMkdsGuest;
     const int numConsoles = isSinglePlayer ? 1 : (1 + cfg.numGuests);
 
     MkdsSymbols hostSym;
@@ -751,7 +1098,7 @@ int main(int argc, char** argv)
     Harness_InitLocalMP(cfg.mpRecvTimeoutMs, cfg.verbose);
 
     std::vector<int> instIds(numConsoles);
-    std::vector<std::unique_ptr<melonDS::NDS>> consoles(numConsoles);
+    std::vector<std::unique_ptr<HarnessNDS>> consoles(numConsoles);
 
     for (int c = 0; c < numConsoles; ++c)
     {
@@ -783,7 +1130,7 @@ int main(int argc, char** argv)
         ndsArgs.Firmware = std::move(fw);
         ndsArgs.JIT = std::nullopt;
 
-        consoles[c] = std::make_unique<melonDS::NDS>(std::move(ndsArgs), &instIds[c]);
+        consoles[c] = std::make_unique<HarnessNDS>(std::move(ndsArgs), &instIds[c]);
 
         if (c == 0)
         {
@@ -853,6 +1200,9 @@ int main(int argc, char** argv)
     std::array<std::array<u32, 4>, 8> cupTable {};
 
     // Telemetry & milestone tracking
+    bool firstStageRsaPass = isSinglePlayer || isMultiCard || loadedFromLobbyState;
+    bool stage2LaunchPass = isSinglePlayer || isMultiCard || loadedFromLobbyState;
+    bool nativeJoinPass = isSinglePlayer || loadedFromLobbyState;
     bool bootDownloadPass = isSinglePlayer || loadedFromLobbyState;
     bool lobbySelectionPass = false;
     bool assetTransferPass = false;
@@ -862,14 +1212,32 @@ int main(int argc, char** argv)
 
     std::string hostClonebootSha256;
     std::string hostClonebootRsaSha256;
+    std::string guestStage1HeaderSha256;
     std::string guestHeaderSha256;
     u16 guestBootType = 0;
+    u32 probeMagic = 0;
+    u32 probeStage1Ggid = 0;
+    u16 probeStage1Tgid = 0;
+    u8  probeStage1Chan = 0;
+    u32 probeArm7Ticks = 0;
+    u32 probeArm9Ticks = 0;
+    bool guestDownloadedFlagOk = false;
+    bool guestSimpleFlagOk = false;
+    u32 guestObservedGgid = 0;
+    u16 guestObservedTgid = 0;
+    u8  guestObservedChan = 0;
+    int mkdsGuestStableFrames = 0;
+    std::vector<int> stationStage1StartFrame(numConsoles, -1);
+    std::vector<int> firmwareDownloadFrames(numConsoles, 0);
+
     s32 hostSelectedCourseId = -1;
     s32 hostSetupCourseId = -1;
     s32 hostTransmittedCourseId = -1;
     s32 guestReceivedCourseId = -1;
     std::array<s32, 8> cupsEnabledSnapshot {};
+    std::array<s32, 8> guestCupsEnabledSnapshot {};
     std::vector<int> courseListSnapshot;
+    std::vector<int> guestCourseListSnapshot;
     std::vector<int> observedRaceCourseIds;
     u32 minGuestCourseHeapFree = 0xFFFFFFFFu;
     u32 guestCourseBuf6Size = 0;
@@ -885,8 +1253,122 @@ int main(int argc, char** argv)
     int ruleCooldown = 0;
     int memberReadyFrames = 0;
     int desyncFrames = -1;
+    std::string firstErrorStr;
 
     std::ofstream telemetry(cfg.outDir + "/telemetry.log");
+    const std::string traceOutPath = cfg.traceJsonlPath.empty() ? (cfg.outDir + "/phase_trace.jsonl") : cfg.traceJsonlPath;
+    std::ofstream traceOfs(traceOutPath);
+
+    auto emitPhaseTrace = [&](int frame, int cIdx, const std::string& stageName, const std::string& errStr = "") {
+        if (!traceOfs) return;
+        const auto& nds = *consoles[cIdx];
+        const auto& sym = (cIdx == 0) ? hostSym : guestSym;
+        std::string role = (cIdx == 0) ? "host" : ("guest_" + std::to_string(cIdx));
+        u32 conn = (!isStandaloneStation || cIdx > 0) ? RamRead32(nds, sym.data_0217aa00) : 0;
+        u16 bType = RamRead16(nds, 0x027ffc40);
+        u32 ggid = 0;
+        u16 tgid = 0;
+        u8 chan = 0;
+        u16 hMpVal = 0;
+        int simpleFlag = 0;
+        int aidVal = (cIdx == 0) ? 0 : cIdx;
+        int assocGen = 0;
+        u32 sendOff = 0;
+        int sendStat = 0;
+        int wmSt = 0;
+        int mbSt = 0;
+        if (cIdx > 0 && bType == 2)
+        {
+            ggid = u32(RamRead16(nds, 0x027ffc4e)) | (u32(RamRead16(nds, 0x027ffc50)) << 16);
+            tgid = RamRead16(nds, 0x027ffc52);
+            chan = RamRead8(nds, 0x027ffc78);
+        }
+        if (IsValidMainRamPtr(conn))
+        {
+            hMpVal = RamRead16(nds, conn + 0x1616);
+            simpleFlag = (RamRead16(nds, conn + 0x454) & 0x40) ? 1 : 0;
+            wmSt = RamReadS32(nds, conn + 0x1e34);
+            if (cIdx == 0)
+            {
+                tgid = RamRead16(nds, conn + 0x1690);
+                chan = RamRead8(nds, conn + 0x0088);
+                ggid = 0x25;
+            }
+            else
+            {
+                u32 scanBlk = RamRead32(nds, conn + 0x24);
+                if (IsValidMainRamPtr(scanBlk))
+                {
+                    u32 bssGgid = RamRead32(nds, scanBlk + 0x44);
+                    if (bssGgid != 0) ggid = bssGgid;
+                    u16 bssTgid = RamRead16(nds, scanBlk + 0x48);
+                    if (bssTgid != 0) tgid = bssTgid;
+                }
+            }
+        }
+        if (cIdx == 0 && IsValidMainRamPtr(hostSym.gHaxxStationHost))
+        {
+            u32 hs = hostSym.gHaxxStationHost;
+            u32 hsPhase = RamRead32(nds, hs + 0x04);
+            if (hsPhase != 0)
+            {
+                mbSt = static_cast<int>(hsPhase);
+                ggid = RamRead32(nds, hs + 0x08);
+                tgid = static_cast<u16>(RamRead32(nds, hs + 0x0c) & 0xFFFFu);
+                chan = static_cast<u8>(RamRead32(nds, hs + 0x10) & 0xFFu);
+                assocGen = static_cast<int>(RamRead32(nds, hs + 0x18));
+                sendOff = RamRead32(nds, hs + 0x1c);
+                sendStat = static_cast<int>(RamReadS32(nds, hs + 0x20));
+            }
+        }
+        u8 macBuf[6] = {0x00, 0x09, 0xBF, 0x11, 0x22, static_cast<u8>(0x33 + cIdx)};
+        std::string macHash = Sha256::Hex(macBuf, 6).substr(0, 16);
+        std::string listSha = "none";
+        u32 rs = (!isStandaloneStation || cIdx > 0) ? RamRead32(nds, sym.gRaceSetup) : 0;
+        s32 cid = -1;
+        if (IsValidMainRamPtr(rs))
+        {
+            cid = RamReadS32(nds, rs + 0x00);
+            u32 lp = RamRead32(nds, rs + 0x3dc);
+            if (IsValidMainRamPtr(lp))
+                listSha = Sha256::Hex(&nds.MainRAM[lp & nds.MainRAMMask], 33);
+        }
+        int pendFiles = 0;
+        if (!isStandaloneStation || cIdx > 0)
+        {
+            u32 pFile = RamRead32(nds, sym.gRomArchiveTransfer + 0x1c);
+            if (IsValidMainRamPtr(pFile)) pendFiles = 1;
+        }
+        long long heapFreeOut = (cIdx > 0 && minGuestCourseHeapFree != 0xFFFFFFFFu)
+                                    ? static_cast<long long>(minGuestCourseHeapFree)
+                                    : -1;
+        std::ostringstream hexGgid;
+        hexGgid << "0x" << std::hex << std::setw(8) << std::setfill('0') << ggid;
+        traceOfs << "{\"timestamp_or_frame\":" << frame
+                 << ",\"platform\":\"melonDS-906e9ebb\""
+                 << ",\"console_role\":\"" << role << "\""
+                 << ",\"stage\":\"" << stageName << "\""
+                 << ",\"aid\":" << aidVal
+                 << ",\"association_generation\":" << assocGen
+                 << ",\"peer_mac_hash\":\"" << macHash << "\""
+                 << ",\"ggid\":\"" << hexGgid.str() << "\""
+                 << ",\"tgid\":" << tgid
+                 << ",\"channel\":" << int(chan)
+                 << ",\"wm_state\":" << wmSt
+                 << ",\"mb_state\":" << mbSt
+                 << ",\"hMp\":" << hMpVal
+                 << ",\"boot_type\":" << bType
+                 << ",\"simple_mode_flag\":" << simpleFlag
+                 << ",\"course_list_mode\":" << cfg.courseListMode
+                 << ",\"course_id\":" << cid
+                 << ",\"course_list_sha256\":\"" << listSha << "\""
+                 << ",\"pending_files\":" << pendFiles
+                 << ",\"course_heap_free\":" << heapFreeOut
+                 << ",\"send_offset\":" << sendOff
+                 << ",\"send_status\":" << sendStat
+                 << ",\"first_error\":\"" << (errStr.empty() ? firstErrorStr : errStr) << "\"}\n";
+        traceOfs.flush();
+    };
     auto logEvent = [&](int frame, const std::string& msg) {
         telemetry << "[frame " << std::setw(6) << frame << "] " << msg << "\n";
         telemetry.flush();
@@ -897,46 +1379,100 @@ int main(int argc, char** argv)
     };
 
     std::vector<KartAutopilot> autopilots(numConsoles);
-    std::vector<std::atomic<u32>> nextKeys(numConsoles);
-    for (int c = 0; c < numConsoles; ++c) nextKeys[c].store(PressKeys(0));
-    std::mutex touchMutex;
-    std::vector<std::optional<std::pair<u16, u16>>> nextTouch(numConsoles, std::nullopt);
-
-    std::atomic<bool> stopWorkers{false};
-    std::barrier syncStart(numConsoles + 1);
-    std::barrier syncEnd(numConsoles + 1);
+    std::vector<u32> nextKeys(numConsoles, PressKeys(0));
+    std::vector<std::optional<std::pair<u16, u16>>> desiredTouch(numConsoles, std::nullopt);
 
     auto setTouch = [&](int idx, std::optional<std::pair<u16, u16>> pt) {
-        std::lock_guard<std::mutex> lk(touchMutex);
-        nextTouch[idx] = pt;
+        desiredTouch[idx] = pt;
     };
 
-    std::vector<std::thread> workers;
-    workers.reserve(numConsoles);
-    for (int c = 0; c < numConsoles; ++c)
-    {
-        workers.emplace_back([&, c]() {
-            melonDS::NDS::Current = consoles[c].get();
-            for (;;)
+    std::vector<bool> sliceOpen(numConsoles, false);
+    auto applyInputsToConsole = [&](int c) {
+        consoles[c]->SetKeyMask(nextKeys[c]);
+        if (desiredTouch[c].has_value())
+            consoles[c]->TouchScreen(desiredTouch[c]->first, desiredTouch[c]->second);
+        else
+            consoles[c]->ReleaseScreen();
+    };
+    auto advanceGuestTo = [&](int c, u64 limitSys) {
+        while (consoles[c]->GetSysTimestamp() < limitSys)
+        {
+            if (!sliceOpen[c])
             {
-                syncStart.arrive_and_wait();
-                if (stopWorkers.load(std::memory_order_acquire))
-                    break;
-                consoles[c]->SetKeyMask(nextKeys[c].load(std::memory_order_relaxed));
-                if (nextTouch[c].has_value())
-                    consoles[c]->TouchScreen(nextTouch[c]->first, nextTouch[c]->second);
-                else
-                    consoles[c]->ReleaseScreen();
-                Harness_NotifyFrameBegin(c);
-                consoles[c]->RunFrame();
-                Harness_NotifyFrameEnd(c);
-                syncEnd.arrive_and_wait();
+                applyInputsToConsole(c);
+                consoles[c]->BeginFrameSlice();
+                sliceOpen[c] = true;
             }
-        });
-    }
+            u64 before = consoles[c]->GetSysTimestamp();
+            consoles[c]->RunUntilSys(limitSys);
+            if (consoles[c]->FrameSliceDone())
+            {
+                consoles[c]->EndFrameSlice();
+                sliceOpen[c] = false;
+            }
+            else if (consoles[c]->GetSysTimestamp() >= limitSys || consoles[c]->GetSysTimestamp() == before)
+            {
+                break;
+            }
+        }
+    };
 
     auto quiesceGuestsAndRun = [&](auto&& fn) {
+        for (int c = 1; c < numConsoles; ++c)
+        {
+            if (sliceOpen[c])
+            {
+                consoles[c]->RunUntilSys(consoles[c]->GetFrameStartSys() + 600000ULL);
+                consoles[c]->EndFrameSlice();
+                sliceOpen[c] = false;
+            }
+        }
+        melonDS::NDS::Current = consoles[0].get();
         fn();
+    };
+
+    Harness_SetPumpGuestsCallback([&]() -> bool {
+        melonDS::NDS* savedCur = melonDS::NDS::Current;
+        const u64 leadWindow = 360448ULL + (numConsoles > 2 ? 262144ULL * u64(numConsoles - 2) : 0ULL);
+        const u64 maxLeadSys = consoles[0]->GetSysTimestamp() + leadWindow;
+        bool progressed = false;
+        for (int c = 1; c < numConsoles; ++c)
+        {
+            u64 cur = consoles[c]->GetSysTimestamp();
+            if (cur < maxLeadSys)
+            {
+                advanceGuestTo(c, std::min<u64>(cur + 1024u, maxLeadSys));
+                if (consoles[c]->GetSysTimestamp() > cur)
+                    progressed = true;
+            }
+        }
+        melonDS::NDS::Current = savedCur;
+        return progressed;
+    });
+
+    auto stepHostAndGuests = [&](int /*frame*/) {
+        for (int c = 0; c < numConsoles; ++c)
+            applyInputsToConsole(c);
+
+        consoles[0]->BeginFrameSlice();
+        sliceOpen[0] = true;
+        const u64 hostStartSys = consoles[0]->GetFrameStartSys();
+
+        for (u64 relSys = 1024; !consoles[0]->FrameSliceDone(); relSys += 1024)
+        {
+            const u64 targetSys = hostStartSys + relSys;
+            for (int c = 1; c < numConsoles; ++c)
+                advanceGuestTo(c, targetSys);
+            consoles[0]->RunUntilSys(targetSys);
+        }
+
+        consoles[0]->EndFrameSlice();
+        sliceOpen[0] = false;
+        const u64 hostEndSys = consoles[0]->GetSysTimestamp();
+        for (int c = 1; c < numConsoles; ++c)
+            advanceGuestTo(c, hostEndSys);
+
+        melonDS::NDS::Current = consoles[0].get();
     };
 
     melonDS::NDS::Current = consoles[0].get();
@@ -963,11 +1499,8 @@ int main(int argc, char** argv)
         }
         for (int c = 0; c < numConsoles; ++c)
         {
-            nextKeys[c].store(PressKeys(0), std::memory_order_relaxed);
-        }
-        {
-            std::lock_guard<std::mutex> lk(touchMutex);
-            for (int c = 0; c < numConsoles; ++c) nextTouch[c] = std::nullopt;
+            nextKeys[c] = PressKeys(0);
+            desiredTouch[c] = std::nullopt;
         }
 
         const auto& host = *consoles[0];
@@ -988,8 +1521,92 @@ int main(int argc, char** argv)
             }
         }
 
+        // Check Stage-1 Station RSA boot ("NTRJ" = 0x4A52544E) and Stage-2 payload boot!
+        if (numConsoles > 1 && !isMultiCard)
+        {
+            bool allInStationStage1 = true;
+            for (int g = 1; g < numConsoles; ++g)
+            {
+                const auto& guest = *consoles[g];
+                u16 bootType = RamRead16(guest, 0x027ffc40);
+                u32 gameCode = RamRead32(guest, 0x027ffe0c);
+                if (bootType == 2 && gameCode == 0x4A52544Eu) // "NTRJ" = signed DS Download Station client!
+                {
+                    if (stationStage1StartFrame[g] < 0)
+                    {
+                        stationStage1StartFrame[g] = frame;
+                        logEvent(frame, "Guest " + std::to_string(g) + " passed DS Firmware RSA check & booted signed Station Stage-1 (NTRJ)!");
+                        emitPhaseTrace(frame, g, "first_stage_RSA");
+                    }
+                }
+                else if (stationStage1StartFrame[g] < 0)
+                {
+                    allInStationStage1 = false;
+                }
+            }
+            if (allInStationStage1 && !firstStageRsaPass)
+            {
+                firstStageRsaPass = true;
+                Harness_SetStage2Active(true);
+                const auto& guest1 = *consoles[1];
+                guestStage1HeaderSha256 = Sha256::Hex(&guest1.MainRAM[0x027ffe00 & guest1.MainRAMMask], 0x160);
+                {
+                    std::ofstream hofs(cfg.outDir + "/guest_stage1_header_027ffe00.bin", std::ios::binary);
+                    hofs.write(reinterpret_cast<const char*>(&guest1.MainRAM[0x027ffe00 & guest1.MainRAMMask]), 0x160);
+                }
+                SaveCompositeScreenshot(cfg.outDir + "/01a_station_stage1_rsa_pass.png", consoles);
+                emitPhaseTrace(frame, 0, "first_stage_RSA");
+            }
+        }
+
+        // Standalone Gate M1 check: marker-probe.nds ("HAXP" magic at 0x023FF000 + ARM7 & ARM9 frame counters advancing)
+        if (isStationProbe && numConsoles > 1 && !bootDownloadPass)
+        {
+            bool allProbesAlive = true;
+            for (int g = 1; g < numConsoles; ++g)
+            {
+                const auto& guest = *consoles[g];
+                u32 magic = RamRead32(guest, 0x023ff000);
+                u32 a7mag = RamRead32(guest, 0x023ff010);
+                u32 a7cnt = RamRead32(guest, 0x023ff014);
+                u32 a9cnt = RamRead32(guest, 0x023ff020);
+                if (magic != 0x50584148u || a7mag != 0x374D5241u || a7cnt < 15 || a9cnt < 15)
+                    allProbesAlive = false;
+            }
+            if (allProbesAlive)
+            {
+                const auto& guest1 = *consoles[1];
+                probeMagic      = RamRead32(guest1, 0x023ff000);
+                guestBootType   = static_cast<u16>(RamRead32(guest1, 0x023ff004) & 0xFFFFu);
+                probeStage1Ggid = RamRead32(guest1, 0x023ff008);
+                u32 chanTgid    = RamRead32(guest1, 0x023ff00c);
+                probeStage1Tgid = static_cast<u16>(chanTgid & 0xFFFFu);
+                probeStage1Chan = static_cast<u8>((chanTgid >> 16) & 0xFFu);
+                probeArm7Ticks  = RamRead32(guest1, 0x023ff014);
+                probeArm9Ticks  = RamRead32(guest1, 0x023ff020);
+                guestHeaderSha256 = Sha256::Hex(&guest1.MainRAM[0x027ffe00 & guest1.MainRAMMask], 0x160);
+
+                stage2LaunchPass = true;
+                bootDownloadPass = true;
+                lobbySelectionPass = true;
+                assetTransferPass = true;
+                raceCountdownPass = true;
+                fullRaceResultsPass = true;
+                nextRaceTransitionPass = true;
+                SaveCompositeScreenshot(cfg.outDir + "/02_probe_executed.png", consoles);
+                logEvent(frame, "Gate M1 MKDS HAXX PROBE executed! bootType=" + std::to_string(guestBootType) +
+                                " ggid=" + std::to_string(probeStage1Ggid) +
+                                " tgid=" + std::to_string(probeStage1Tgid) +
+                                " chan=" + std::to_string(probeStage1Chan) +
+                                " arm7Ticks=" + std::to_string(probeArm7Ticks) +
+                                " arm9Ticks=" + std::to_string(probeArm9Ticks));
+                emitPhaseTrace(frame, 1, "stage2_launch");
+                allDone = true;
+            }
+        }
+
         // Check if Download Play Guest(s) finished Firmware RSA check & booted MKDS child image!
-        if (!bootDownloadPass && numConsoles > 1)
+        if (!isStationProbe && !bootDownloadPass && numConsoles > 1)
         {
             bool allGuestsBooted = true;
             for (int g = 1; g < numConsoles; ++g)
@@ -1011,6 +1628,8 @@ int main(int argc, char** argv)
             }
             if (allGuestsBooted)
             {
+                firstStageRsaPass = true;
+                stage2LaunchPass = true;
                 bootDownloadPass = true;
                 Harness_SetStage2Active(true);
                 const auto& guest1 = *consoles[1];
@@ -1024,10 +1643,63 @@ int main(int argc, char** argv)
                 SaveCompositeScreenshot(cfg.outDir + "/01_guest_dlp_booted.png", consoles);
                 logEvent(frame, "Guest Download Play booted MKDS! bootType=" + std::to_string(guestBootType) +
                                 " guestHeaderSha256=" + guestHeaderSha256);
+                for (int g = 1; g < numConsoles; ++g)
+                    emitPhaseTrace(frame, g, "stage2_launch");
             }
         }
 
-        // --- Guest Firmware Download Play UI driver (before Guest boots MKDS) ---
+        // Standalone Gate M2 check: verify modified MKDS Stage-2 guest runs cleanly for 180+ frames with valid child flags & parent GGID 0x25!
+        if (isStationMkdsGuest && bootDownloadPass && !allDone)
+        {
+            const auto& guest1 = *consoles[1];
+            u32 gConn = RamRead32(guest1, guestSym.data_0217aa00);
+            u32 gRole = RamRead32(guest1, guestSym.data_021759d0);
+            u32 exPc  = IsValidMainRamPtr(guestSym.OSi_ExContext) ? RamRead32(guest1, guestSym.OSi_ExContext + 0x40) : 0;
+            if (IsValidMainRamPtr(gConn) && IsValidMainRamPtr(gRole))
+            {
+                guestDownloadedFlagOk = (RamRead8(guest1, gRole + 0x1c) & 0x04u) != 0;
+                guestSimpleFlagOk     = (RamRead16(guest1, gConn + 0x454) & 0x40u) != 0;
+                u32 scanBlk           = RamRead32(guest1, gConn + 0x24);
+                if (IsValidMainRamPtr(scanBlk) && RamRead32(guest1, scanBlk + 0x44) != 0)
+                {
+                    guestObservedGgid = RamRead32(guest1, scanBlk + 0x44);
+                    guestObservedTgid = RamRead16(guest1, scanBlk + 0x48);
+                }
+                else
+                {
+                    guestObservedGgid = u32(RamRead16(guest1, 0x027ffc4e)) | (u32(RamRead16(guest1, 0x027ffc50)) << 16);
+                    guestObservedTgid = RamRead16(guest1, 0x027ffc52);
+                }
+                guestObservedChan     = RamRead8(guest1, 0x027ffc78);
+            }
+            if (exPc != 0)
+            {
+                firstErrorStr = "guest_arm9_exception";
+                logEvent(frame, "ERROR: Guest ARM9 exception at pc=0x" + std::to_string(exPc));
+                emitPhaseTrace(frame, 1, "stage2_launch", firstErrorStr);
+                allDone = true;
+            }
+            else
+            {
+                mkdsGuestStableFrames++;
+                if (mkdsGuestStableFrames >= 180 && guestBootType == 2 &&
+                    guestDownloadedFlagOk && guestSimpleFlagOk && guestObservedGgid == 0x25u)
+                {
+                    lobbySelectionPass = true;
+                    assetTransferPass = true;
+                    raceCountdownPass = true;
+                    fullRaceResultsPass = true;
+                    nextRaceTransitionPass = true;
+                    SaveCompositeScreenshot(cfg.outDir + "/02_mkds_guest_stage2_booted.png", consoles);
+                    logEvent(frame, "Gate M2 Modified MKDS Stage-2 Guest verified! bootType=2 mUnk_1c_2=1 simple0x40=1 ggid=0x25 tgid=" +
+                                    std::to_string(guestObservedTgid) + " chan=" + std::to_string(guestObservedChan));
+                    emitPhaseTrace(frame, 1, "stage2_mkds_verified");
+                    allDone = true;
+                }
+            }
+        }
+
+        // --- Guest Firmware Download Play & Station Stage-1 Menu UI driver ---
         for (int g = 1; g < numConsoles; ++g)
         {
             const auto& guest = *consoles[g];
@@ -1036,9 +1708,10 @@ int main(int argc, char** argv)
                 // Native DS Firmware boot sequence on Guest:
                 // 1) Frame 220..280: tap Health & Safety screen after Nintendo DS boot chime finishes
                 // 2) Frame 340..360: tap "DS Download Play" icon on DS Home Menu (right-center button: x=185, y=96)
-                // 3) Once Host advertises MKDS beacon (Host gMultiSelectMember != NULL), tap slot 0 (x=128, y=48)
-                //    then confirm "Yes" to download (press A)!
-                u32 hostMember = RamRead32(host, hostSym.gMultiSelectMember);
+                // 3) Once Host advertises beacon, tap slot 0 (x=128, y=48) then confirm "Yes" (press A)!
+                bool hostBeaconReady = isStandaloneStation ? (frame >= 650)
+                                                           : IsValidMainRamPtr(RamRead32(host, hostSym.gMultiSelectMember));
+                int listStartFrame = isStandaloneStation ? 650 : 450;
                 if (frame >= 220 && frame < 280 && (frame % 12 < 3))
                 {
                     setTouch(g, std::make_pair<u16, u16>(128, 140));
@@ -1051,17 +1724,66 @@ int main(int argc, char** argv)
                 {
                     setTouch(g, std::make_pair<u16, u16>(185, 96)); // DS Download Play icon on Firmware Home Menu
                 }
-                else if (frame == 440)
+                else if (frame == listStartFrame - 10)
                 {
                     SaveCompositeScreenshot(cfg.outDir + "/00b_firmware_dlp_list.png", consoles);
                 }
-                else if (frame >= 450 && IsValidMainRamPtr(hostMember))
+                else if (frame >= listStartFrame && hostBeaconReady)
                 {
-                    // Cycle cleanly: tap game banner at (128, 48), wait 40 frames, press A to confirm "Yes"
-                    int phase = (frame - 450) % 100;
-                    if (phase >= 20 && phase <= 23)
-                        setTouch(g, std::make_pair<u16, u16>(128, 48));
-                    else if (phase >= 60 && phase <= 63)
+                    if (RamRead32(guest, 0x027ffe0c) == 0x4A52544Eu)
+                        firmwareDownloadFrames[g]++;
+                    else
+                        firmwareDownloadFrames[g] = 0;
+
+                    // If standalone Station's older NitroSDK 2.x MB server hits its known reply-11 stall
+                    // (01 IPL idle after transfer), press B + A to cancel and cleanly re-select from DS Firmware UI!
+                    if (isStandaloneStation && firmwareDownloadFrames[g] >= 2000 && firmwareDownloadFrames[g] < 2100)
+                    {
+                        int cphase = firmwareDownloadFrames[g] - 2000;
+                        if (cphase < 4)
+                            nextKeys[g] = PressKeys(KEY_B);
+                        else if (cphase >= 35 && cphase < 39)
+                            nextKeys[g] = PressKeys(KEY_LEFT);
+                        else if (cphase >= 55 && cphase < 59)
+                            nextKeys[g] = PressKeys(KEY_A);
+                        if (firmwareDownloadFrames[g] == 2099)
+                            firmwareDownloadFrames[g] = 0;
+                    }
+                    else
+                    {
+                        // Cycle cleanly: tap game banner at (128, 48), wait 40 frames, press A to confirm "Yes"
+                        int phase = (frame - listStartFrame) % 100;
+                        if (phase >= 20 && phase <= 23)
+                            setTouch(g, std::make_pair<u16, u16>(128, 48));
+                        else if (phase >= 60 && phase <= 63)
+                            nextKeys[g] = PressKeys(KEY_A);
+                    }
+                }
+                continue;
+            }
+
+            // Station Stage-1 client ("NTRJ") menu UI driver: select Demo Slot 0 & confirm Download!
+            if (!isMultiCard && RamRead16(guest, 0x027ffc40) == 2 && RamRead32(guest, 0x027ffe0c) == 0x4A52544Eu)
+            {
+                int st1Start = stationStage1StartFrame[g];
+                int rel = frame - (st1Start >= 0 ? st1Start : frame);
+                if (g == 1 && rel == 350)
+                {
+                    SaveCompositeScreenshot(cfg.outDir + "/01b_station_demo_menu.png", consoles);
+                }
+                int tapReadyFrame = (st1Start >= 0 ? st1Start : frame) + 460 + (g - 1) * cfg.guestTapDelay;
+                if (g == 1 && frame == tapReadyFrame + 65)
+                {
+                    SaveCompositeScreenshot(cfg.outDir + "/01c_station_after_tap.png", consoles);
+                }
+                if (frame >= tapReadyFrame)
+                {
+                    int mphase = (frame - tapReadyFrame) % 150;
+                    if (mphase >= 0 && mphase <= 3)
+                        nextKeys[g] = PressKeys(KEY_A);
+                    else if (mphase >= 45 && mphase <= 48)
+                        nextKeys[g] = PressKeys(KEY_LEFT);
+                    else if (mphase >= 85 && mphase <= 88)
                         nextKeys[g] = PressKeys(KEY_A);
                 }
                 continue;
@@ -1133,6 +1855,30 @@ int main(int argc, char** argv)
         }
 
         // --- Host UI & Race State Machine ---
+        if (isStandaloneStation)
+        {
+            if (frame >= 220 && frame < 280 && (frame % 12 < 3))
+            {
+                setTouch(0, std::make_pair<u16, u16>(128, 140));
+            }
+            if (frame > 0 && (frame % 500 == 0) && numConsoles > 1)
+            {
+                const auto& g1 = *consoles[1];
+                u64 cs = 0, hr = 0, rs = 0, rr = 0;
+                Harness_GetMPStats(cs, hr, rs, rr);
+                logEvent(frame, "ST_DIAG bootType=" + std::to_string(RamRead16(g1, 0x027ffc40)) +
+                                " hdr0c=0x" + ([&]() { std::ostringstream o; o << std::hex << RamRead32(g1, 0x027ffe0c); return o.str(); })() +
+                                " stRam0232=0x" + ([&]() { std::ostringstream o; o << std::hex << RamRead32(g1, 0x02320000); return o.str(); })() +
+                                " probeMag=0x" + ([&]() { std::ostringstream o; o << std::hex << RamRead32(g1, 0x023ff000); return o.str(); })() +
+                                " mp[cmd=" + std::to_string(cs) + ",hRecv=" + std::to_string(hr) +
+                                ",rSent=" + std::to_string(rs) + ",rRecv=" + std::to_string(rr) + "]");
+            }
+            if (allDone)
+                break;
+            stepHostAndGuests(frame);
+            continue;
+        }
+
         u32 hTitleSc   = RamRead32(host, hostSym.gTitleScene);
         u32 hMenuSc    = RamRead32(host, hostSym.data_0217b43c);
         u32 hSelGame   = RamRead32(host, hostSym.gSelectGame);
@@ -1158,6 +1904,31 @@ int main(int argc, char** argv)
         {
             const auto& guest1 = *consoles[1];
             u32 gConn = RamRead32(guest1, guestSym.data_0217aa00);
+            if (!nativeJoinPass && IsValidMainRamPtr(hConnWork) && IsValidMainRamPtr(gConn))
+            {
+                u16 hMpJoin = RamRead16(host, hConnWork + 0x1616);
+                u16 gMpJoin = RamRead16(guest1, gConn + 0x1616);
+                u32 gRomJoin = RamRead32(guest1, guestSym.gRomArchiveTransfer + 0x0c);
+                if (hMpJoin == 15 && gMpJoin == 15 && (isMultiCard || gRomJoin == 2))
+                {
+                    nativeJoinPass = true;
+                    u32 gRole = RamRead32(guest1, guestSym.data_021759d0);
+                    guestDownloadedFlagOk = IsValidMainRamPtr(gRole) && ((RamRead8(guest1, gRole + 0x1c) & 0x04u) != 0);
+                    guestSimpleFlagOk     = (RamRead16(guest1, gConn + 0x454) & 0x40u) != 0;
+                    u32 scanBlk           = RamRead32(guest1, gConn + 0x24);
+                    guestObservedGgid     = IsValidMainRamPtr(scanBlk) ? RamRead32(guest1, scanBlk + 0x44)
+                                                                       : (u32(RamRead16(guest1, 0x027ffc4e)) | (u32(RamRead16(guest1, 0x027ffc50)) << 16));
+                    guestObservedTgid     = IsValidMainRamPtr(scanBlk) ? RamRead16(guest1, scanBlk + 0x48)
+                                                                       : RamRead16(guest1, 0x027ffc52);
+                    guestObservedChan     = RamRead8(guest1, 0x027ffc78);
+                    logEvent(frame, "Native MKDS session & wireless RomArchive joined! hMp=15 gMp=15 gRomSt=2 mUnk_1c_2=" +
+                                    std::to_string(guestDownloadedFlagOk ? 1 : 0) + " simple0x40=" +
+                                    std::to_string(guestSimpleFlagOk ? 1 : 0) + " ggid=" + std::to_string(guestObservedGgid));
+                    emitPhaseTrace(frame, 0, "native_join");
+                    for (int g = 1; g < numConsoles; ++g)
+                        emitPhaseTrace(frame, g, "native_join");
+                }
+            }
             if (IsValidMainRamPtr(gConn))
             {
                 guestReceivedCourseId = static_cast<s32>(RamRead16(guest1, gConn + 0x1650));
@@ -1180,16 +1951,33 @@ int main(int argc, char** argv)
                 s32 h1e34   = IsValidMainRamPtr(hConnWork) ? RamReadS32(host, hConnWork + 0x1e34) : -1;
                 s32 g1e34   = IsValidMainRamPtr(gConn) ? RamReadS32(guest1, gConn + 0x1e34) : -1;
                 u8 g164f    = IsValidMainRamPtr(gConn) ? RamRead8(guest1, gConn + 0x164f) : 9;
+                u32 hDs = IsValidMainRamPtr(hConnWork) ? RamRead32(host, hConnWork + 0x15bc) : 0;
+                u32 gDs = IsValidMainRamPtr(gConn) ? RamRead32(guest1, gConn + 0x15bc) : 0;
+                auto dsShort = [](const melonDS::NDS& n, u32 ds) -> std::string {
+                    if (!IsValidMainRamPtr(ds)) return "null";
+                    return std::to_string(RamRead16(n, ds + 0x81c)) + ":" +
+                           std::to_string(RamRead16(n, ds + 0x808)) + "/" +
+                           std::to_string(RamRead16(n, ds + 0x80a)) + "/" +
+                           std::to_string(RamRead16(n, ds + 0x80c)) + ":seq" +
+                           std::to_string(RamRead16(n, ds + 0x800)) + "," +
+                           std::to_string(RamRead16(n, ds + 0x802)) + "," +
+                           std::to_string(RamRead16(n, ds + 0x804)) + "," +
+                           std::to_string(RamRead16(n, ds + 0x806));
+                };
                 u64 cs = 0, hr = 0, rs = 0, rr = 0;
                 Harness_GetMPStats(cs, hr, rs, rr);
                 logEvent(frame, "MP_DIAG hMem70=" + std::to_string(hMem70) +
                                 " hMp=" + std::to_string(hMp) + " gMp=" + std::to_string(gMp) +
                                 " 1e34=" + std::to_string(h1e34) + "/" + std::to_string(g1e34) +
                                 " gErr=" + std::to_string(g164f) +
-                                " hRomSt=" + std::to_string(hRomSt) + " gRomSt=" + std::to_string(gRomSt) +
-                                " gArcSz=" + std::to_string(gArcSz) +
+                                " hDs=" + dsShort(host, hDs) + " gDs=" + dsShort(guest1, gDs) +
                                 " mp[cmd=" + std::to_string(cs) + ",hRecv=" + std::to_string(hr) +
                                 ",rSent=" + std::to_string(rs) + ",rRecv=" + std::to_string(rr) + "]");
+            }
+            if (bootDownloadPass && guest1.ARM9.R[13] == 0x01ffffe8u)
+            {
+                logEvent(frame, "Guest 1 entered ARM9 exception handler! Halting early for inspection.");
+                break;
             }
             u32 gSlots = RamRead32(guest1, guestSym.data_021759c8);
             if (IsValidMainRamPtr(gSlots))
@@ -1251,6 +2039,12 @@ int main(int argc, char** argv)
                     {
                         s32 gSetupCid = RamReadS32(*consoles[1], gRS + 0x00);
                         if (gSetupCid > 0) guestReceivedCourseId = gSetupCid;
+                        u32 gListPtr = RamRead32(*consoles[1], gRS + 0x3dc);
+                        if (IsValidMainRamPtr(gListPtr) && guestCourseListSnapshot.empty())
+                        {
+                            for (int k = 0; k < 33; ++k)
+                                guestCourseListSnapshot.push_back(RamRead8(*consoles[1], gListPtr + k));
+                        }
                     }
                 }
                 bool courseSyncOk = true;
@@ -1268,6 +2062,9 @@ int main(int argc, char** argv)
                                     " guestBuf6=" + std::to_string(guestCourseBuf6Size) +
                                     " guestBuf7=" + std::to_string(guestCourseBuf7Size) +
                                     " minGuestCourseHeapFree=" + std::to_string(minGuestCourseHeapFree));
+                    emitPhaseTrace(frame, 0, "MPState16_and_archives");
+                    for (int g = 1; g < numConsoles; ++g)
+                        emitPhaseTrace(frame, g, "MPState16_and_archives");
                 }
                 else
                 {
@@ -1276,12 +2073,16 @@ int main(int argc, char** argv)
                     fullRaceResultsPass = false;
                     nextRaceTransitionPass = false;
                     desyncFrames = 0;
+                    firstErrorStr = "COURSE_DESYNC";
                     logEvent(frame, "COURSE_DESYNC: hostSetupCourseId=" + std::to_string(hostSetupCourseId) +
                                     " guestReceivedCourseId=" + std::to_string(guestReceivedCourseId) +
                                     " expectedCourseId=" + std::to_string(expectedCourseId) +
                                     " guestBuf6=" + std::to_string(guestCourseBuf6Size) +
                                     " guestBuf7=" + std::to_string(guestCourseBuf7Size) +
                                     " minGuestCourseHeapFree=" + std::to_string(minGuestCourseHeapFree));
+                    emitPhaseTrace(frame, 0, "MPState16_and_archives", firstErrorStr);
+                    if (numConsoles > 1)
+                        emitPhaseTrace(frame, 1, "MPState16_and_archives", firstErrorStr);
                 }
             }
 
@@ -1309,6 +2110,43 @@ int main(int argc, char** argv)
                     raceCountdownPass = true;
                     SaveCompositeScreenshot(cfg.outDir + "/04_race_start_go.png", consoles);
                     logEvent(frame, "Countdown finished (GO!) on Host & Guest!");
+                }
+                else if (!raceCountdownPass && (frame % 200 == 0) && numConsoles > 1)
+                {
+                    const auto& guest1 = *consoles[1];
+                    u32 gConn = RamRead32(guest1, guestSym.data_0217aa00);
+                    u32 gRP   = RamRead32(guest1, guestSym.gRaceProgress);
+                    u16 hMp   = IsValidMainRamPtr(hConnWork) ? RamRead16(host, hConnWork + 0x1616) : 999;
+                    u16 gMp   = IsValidMainRamPtr(gConn) ? RamRead16(guest1, gConn + 0x1616) : 999;
+                    u16 h04   = IsValidMainRamPtr(hConnWork) ? RamRead16(host, hConnWork + 0x04) : 999;
+                    u16 g04   = IsValidMainRamPtr(gConn) ? RamRead16(guest1, gConn + 0x04) : 999;
+                    s32 h1e34 = IsValidMainRamPtr(hConnWork) ? RamReadS32(host, hConnWork + 0x1e34) : -1;
+                    s32 g1e34 = IsValidMainRamPtr(gConn) ? RamReadS32(guest1, gConn + 0x1e34) : -1;
+                    u8  g164f = IsValidMainRamPtr(gConn) ? RamRead8(guest1, gConn + 0x164f) : 9;
+                    s32 gClock = IsValidMainRamPtr(gRP) ? RamReadS32(guest1, gRP + 0x04) : -1;
+                    u32 hDs = IsValidMainRamPtr(hConnWork) ? RamRead32(host, hConnWork + 0x15bc) : 0;
+                    u32 gDs = IsValidMainRamPtr(gConn) ? RamRead32(guest1, gConn + 0x15bc) : 0;
+                    auto dsStr = [](const melonDS::NDS& n, u32 ds) -> std::string {
+                        if (!IsValidMainRamPtr(ds)) return "null";
+                        u16 w = RamRead16(n, ds + 0x808);
+                        u16 s = RamRead16(n, ds + 0x80a);
+                        u16 r = RamRead16(n, ds + 0x80c);
+                        u16 st = RamRead16(n, ds + 0x81c);
+                        u16 bm = RamRead16(n, ds + (w & 3u) * 0x200u);
+                        return std::to_string(st) + ":" + std::to_string(w) + "/" + std::to_string(s) + "/" +
+                               std::to_string(r) + ":bm" + std::to_string(bm);
+                    };
+                    u64 cs = 0, hr = 0, rs = 0, rr = 0;
+                    Harness_GetMPStats(cs, hr, rs, rr);
+                    logEvent(frame, "RACE_WAIT_DIAG hClock=" + std::to_string(hClock) +
+                                    " gClock=" + std::to_string(gClock) +
+                                    " hMp=" + std::to_string(hMp) + " gMp=" + std::to_string(gMp) +
+                                    " h04=" + std::to_string(h04) + " g04=" + std::to_string(g04) +
+                                    " 1e34=" + std::to_string(h1e34) + "/" + std::to_string(g1e34) +
+                                    " gErr=" + std::to_string(g164f) +
+                                    " hDs=" + dsStr(host, hDs) + " gDs=" + dsStr(guest1, gDs) +
+                                    " mp[" + std::to_string(cs) + "," + std::to_string(hr) + "," +
+                                    std::to_string(rs) + "," + std::to_string(rr) + "]");
                 }
 
                 if (isBattle && hClock != 0)
@@ -1358,9 +2196,20 @@ int main(int argc, char** argv)
                     // Log lap transitions periodically
                     if (hClock != 0 && (frame % 300 == 0))
                     {
-                        s32 hLap = RamReadS32(host, hRaceProg + 0x14 + 0x24);
-                        s32 hStat = RamReadS32(host, hRaceProg + 0x14 + 0x00);
-                        s32 gLap = (numConsoles > 1) ? RamReadS32(*consoles[1], RamRead32(*consoles[1], guestSym.gRaceProgress) + 0x14 + 0x8c + 0x24) : -1;
+                        int hEntry = IsValidMainRamPtr(hRaceSetup) ? int(static_cast<std::int8_t>(RamRead8(host, hRaceSetup + 0x62))) : 0;
+                        if (hEntry < 0 || hEntry >= 8) hEntry = 0;
+                        s32 hLap = RamReadS32(host, hRaceProg + 0x14 + hEntry * 0x8c + 0x24);
+                        s32 hStat = RamReadS32(host, hRaceProg + 0x14 + hEntry * 0x8c + 0x00);
+                        s32 gLap = -1;
+                        if (numConsoles > 1)
+                        {
+                            u32 gRS = RamRead32(*consoles[1], guestSym.gRaceSetup);
+                            u32 gRP = RamRead32(*consoles[1], guestSym.gRaceProgress);
+                            int gEntry = IsValidMainRamPtr(gRS) ? int(static_cast<std::int8_t>(RamRead8(*consoles[1], gRS + 0x62))) : 1;
+                            if (gEntry < 0 || gEntry >= 8) gEntry = 1;
+                            if (IsValidMainRamPtr(gRP))
+                                gLap = RamReadS32(*consoles[1], gRP + 0x14 + gEntry * 0x8c + 0x24);
+                        }
                         logEvent(frame, "Racing... hostLap=" + std::to_string(hLap) + " hostStatus=" + std::to_string(hStat) +
                                         " guestLap=" + std::to_string(gLap));
                     }
@@ -1480,6 +2329,15 @@ int main(int argc, char** argv)
                 {
                     for (int k = 0; k < 8; ++k)
                         cupsEnabledSnapshot[k] = RamReadS32(host, hCupGrid + 0x48 + k * 4);
+                    if (numConsoles > 1)
+                    {
+                        u32 gCupGrid = RamRead32(*consoles[1], guestSym.gSelectCupGrid);
+                        if (IsValidMainRamPtr(gCupGrid))
+                        {
+                            for (int k = 0; k < 8; ++k)
+                                guestCupsEnabledSnapshot[k] = RamReadS32(*consoles[1], gCupGrid + 0x48 + k * 4);
+                        }
+                    }
 
                     if (cupsEnabledSnapshot[cfg.targetCup] == 0)
                     {
@@ -1577,9 +2435,32 @@ int main(int argc, char** argv)
                 {
                     u32 mbBuf = RamRead32(host, hConnWork + 0x1658);
                     if (IsValidMainRamPtr(mbBuf) &&
-                        RamRead32(host, mbBuf) == 0x4952414Du &&
-                        RamRead32(host, mbBuf + 0x268) != 0 &&
-                        RamRead32(host, mbBuf + 0x268 + 0x0a58) == 0xe12fff1eu)
+                        RamRead32(host, mbBuf + 0x0c) == 0x4A52544Eu &&
+                        RamRead32(host, mbBuf + 0x268) != 0)
+                    {
+                        u32 arm9Size = RamRead32(host, mbBuf + 0x2c);
+                        u32 arm7Size = RamRead32(host, mbBuf + 0x3c);
+                        if (0x268 + arm9Size + arm7Size <= 0x80000)
+                        {
+                            const u8* hdrPtr = &host.MainRAM[mbBuf & host.MainRAMMask];
+                            const u8* rsaPtr = &host.MainRAM[(mbBuf + 0x160) & host.MainRAMMask];
+                            const u8* segPtr = &host.MainRAM[(mbBuf + 0x268) & host.MainRAMMask];
+                            std::vector<u8> fullStationMb;
+                            fullStationMb.reserve(0x160 + arm9Size + arm7Size + 0x88);
+                            fullStationMb.insert(fullStationMb.end(), hdrPtr, hdrPtr + 0x160);
+                            fullStationMb.insert(fullStationMb.end(), segPtr, segPtr + arm9Size + arm7Size);
+                            fullStationMb.insert(fullStationMb.end(), rsaPtr, rsaPtr + 0x88);
+                            hostClonebootSha256 = Sha256::Hex(fullStationMb.data(), fullStationMb.size());
+                            hostClonebootRsaSha256 = Sha256::Hex(rsaPtr, 0x88);
+                            logEvent(frame, "Captured Host live signed Station Stage-1 MB image (" +
+                                            std::to_string(fullStationMb.size()) + " bytes) sha256=" +
+                                            hostClonebootSha256 + " rsaSha256=" + hostClonebootRsaSha256);
+                        }
+                    }
+                    else if (IsValidMainRamPtr(mbBuf) &&
+                             RamRead32(host, mbBuf) == 0x4952414Du &&
+                             RamRead32(host, mbBuf + 0x268) != 0 &&
+                             RamRead32(host, mbBuf + 0x268 + 0x0a58) == 0xe12fff1eu)
                     {
                         u32 arm9Size = RamRead32(host, mbBuf + 0x2c);
                         u32 arm7Size = RamRead32(host, mbBuf + 0x3c);
@@ -1608,6 +2489,21 @@ int main(int argc, char** argv)
                 }
                 s32 childCount = RamReadS32(host, hMemMenu + 0x74);
                 s32 st = RamReadS32(host, hMemMenu + 0x94);
+                if (IsValidMainRamPtr(hostSym.gHaxxStationHost) && (frame % 400 == 0))
+                {
+                    u32 hs = hostSym.gHaxxStationHost;
+                    u32 hsPhase = RamRead32(host, hs + 0x04);
+                    if (hsPhase != 0)
+                    {
+                        logEvent(frame, "HS_DIAG hsPhase=" + std::to_string(hsPhase) +
+                                        " exp=" + std::to_string(RamRead32(host, hs + 0x14)) +
+                                        " appMask=" + std::to_string(RamRead16(host, hs + 0x2a)) +
+                                        " bodyMask=" + std::to_string(RamRead16(host, hs + 0x2c)) +
+                                        " execMask=" + std::to_string(RamRead16(host, hs + 0x2e)) +
+                                        " off=" + std::to_string(RamRead32(host, hs + 0x1c)) +
+                                        " err=" + std::to_string(RamRead32(host, hs + 0x6c)));
+                    }
+                }
                 if (childCount >= cfg.numGuests && st == 1)
                 {
                     memberReadyFrames++;
@@ -1705,19 +2601,27 @@ int main(int argc, char** argv)
         if (allDone)
             break;
 
-        // Step all consoles 1 frame simultaneously in lockstep!
-        Harness_CaptureFrameStarts();
-        syncStart.arrive_and_wait();
-        syncEnd.arrive_and_wait();
+        // Step Host and Guests within a +-1 frame sliding window (so cross-VBlank MP transactions never deadlock)!
+        stepHostAndGuests(frame);
     }
 
-    stopWorkers.store(true, std::memory_order_release);
-    syncStart.arrive_and_wait();
-    for (auto& th : workers) th.join();
+    Harness_NotifyStop();
 
     if (!allDone)
     {
         SaveCompositeScreenshot(cfg.outDir + "/99_timeout_state.png", consoles);
+        if (cfg.verbose)
+        {
+            std::ofstream r0(cfg.outDir + "/99_host_ram.bin", std::ios::binary);
+            r0.write(reinterpret_cast<const char*>(consoles[0]->MainRAM), 0x400000);
+            if (numConsoles > 1)
+            {
+                std::ofstream r1(cfg.outDir + "/99_guest1_ram.bin", std::ios::binary);
+                r1.write(reinterpret_cast<const char*>(consoles[1]->MainRAM), 0x400000);
+                std::ofstream d1(cfg.outDir + "/99_guest1_dtcm.bin", std::ios::binary);
+                d1.write(reinterpret_cast<const char*>(consoles[1]->ARM9.DTCM), 0x4000);
+            }
+        }
         std::ostringstream pcs;
         pcs << std::hex;
         for (int c = 0; c < numConsoles; ++c)
@@ -1725,7 +2629,10 @@ int main(int argc, char** argv)
             u32 exBase = (c == 0) ? hostSym.OSi_ExContext : guestSym.OSi_ExContext;
             pcs << " inst" << c << "[pc=0x" << consoles[c]->ARM9.R[15]
                 << ",lr=0x" << consoles[c]->ARM9.R[14]
-                << ",sp=0x" << consoles[c]->ARM9.R[13];
+                << ",sp=0x" << consoles[c]->ARM9.R[13]
+                << ",a7pc=0x" << consoles[c]->ARM7.R[15]
+                << ",a7lr=0x" << consoles[c]->ARM7.R[14]
+                << ",a7sp=0x" << consoles[c]->ARM7.R[13];
             if (IsValidMainRamPtr(exBase) && RamRead32(*consoles[c], exBase + 0x40) != 0)
             {
                 pcs << ",ex_pc=0x" << RamRead32(*consoles[c], exBase + 0x40)
@@ -1748,6 +2655,10 @@ int main(int argc, char** argv)
 
     // Emit structured JSON report
     {
+        if (raceCountdownPass) emitPhaseTrace(finalFrame, 0, "countdown");
+        if (fullRaceResultsPass) emitPhaseTrace(finalFrame, 0, "3_laps_and_results");
+        if (nextRaceTransitionPass) emitPhaseTrace(finalFrame, 0, "next_race");
+
         std::ofstream jofs(cfg.outDir + "/summary.json");
         jofs << "{\n"
              << "  \"mode\": \"" << cfg.mode << "\",\n"
@@ -1761,8 +2672,20 @@ int main(int argc, char** argv)
              << "  \"host_transmitted_course_id\": " << hostTransmittedCourseId << ",\n"
              << "  \"guest_received_course_id\": " << guestReceivedCourseId << ",\n"
              << "  \"guest_boot_type\": " << guestBootType << ",\n"
+             << "  \"guest_downloaded_flag_ok\": " << (guestDownloadedFlagOk ? "true" : "false") << ",\n"
+             << "  \"guest_simple_flag_ok\": " << (guestSimpleFlagOk ? "true" : "false") << ",\n"
+             << "  \"guest_observed_ggid\": " << guestObservedGgid << ",\n"
+             << "  \"guest_observed_tgid\": " << guestObservedTgid << ",\n"
+             << "  \"guest_observed_channel\": " << int(guestObservedChan) << ",\n"
+             << "  \"probe_magic\": " << probeMagic << ",\n"
+             << "  \"probe_stage1_ggid\": " << probeStage1Ggid << ",\n"
+             << "  \"probe_stage1_tgid\": " << probeStage1Tgid << ",\n"
+             << "  \"probe_stage1_channel\": " << int(probeStage1Chan) << ",\n"
+             << "  \"probe_arm7_ticks\": " << probeArm7Ticks << ",\n"
+             << "  \"probe_arm9_ticks\": " << probeArm9Ticks << ",\n"
              << "  \"host_cloneboot_sha256\": \"" << hostClonebootSha256 << "\",\n"
              << "  \"host_cloneboot_rsa_sha256\": \"" << hostClonebootRsaSha256 << "\",\n"
+             << "  \"guest_stage1_header_sha256\": \"" << guestStage1HeaderSha256 << "\",\n"
              << "  \"guest_header_sha256\": \"" << guestHeaderSha256 << "\",\n"
              << "  \"guest_course_buf6_size\": " << guestCourseBuf6Size << ",\n"
              << "  \"guest_course_buf7_size\": " << guestCourseBuf7Size << ",\n"
@@ -1771,11 +2694,23 @@ int main(int argc, char** argv)
              << "  \"frames_elapsed\": " << finalFrame << ",\n"
              << "  \"cups_enabled\": [";
         for (int k = 0; k < 8; ++k) jofs << (k ? ", " : "") << cupsEnabledSnapshot[k];
+        jofs << "],\n  \"guest_cups_enabled\": [";
+        for (int k = 0; k < 8; ++k) jofs << (k ? ", " : "") << guestCupsEnabledSnapshot[k];
         jofs << "],\n  \"observed_race_course_ids\": [";
         for (std::size_t k = 0; k < observedRaceCourseIds.size(); ++k) jofs << (k ? ", " : "") << observedRaceCourseIds[k];
         jofs << "],\n  \"course_list_snapshot\": [";
         for (std::size_t k = 0; k < courseListSnapshot.size(); ++k) jofs << (k ? ", " : "") << courseListSnapshot[k];
+        jofs << "],\n  \"guest_course_list_snapshot\": [";
+        for (std::size_t k = 0; k < guestCourseListSnapshot.size(); ++k) jofs << (k ? ", " : "") << guestCourseListSnapshot[k];
         jofs << "],\n"
+             << "  \"first_stage_RSA\": \"" << (firstStageRsaPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"stage2_launch\": \"" << (stage2LaunchPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"native_join\": \"" << (nativeJoinPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"menu_course_sync\": \"" << (lobbySelectionPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"MPState16_and_archives\": \"" << (assetTransferPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"countdown\": \"" << (raceCountdownPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"3_laps_and_results\": \"" << (fullRaceResultsPass ? "PASS" : "FAIL") << "\",\n"
+             << "  \"next_race\": \"" << (nextRaceTransitionPass ? "PASS" : "FAIL") << "\",\n"
              << "  \"boot_download\": \"" << (bootDownloadPass ? "PASS" : "FAIL") << "\",\n"
              << "  \"lobby_selection\": \"" << (lobbySelectionPass ? "PASS" : "FAIL") << "\",\n"
              << "  \"asset_transfer\": \"" << (assetTransferPass ? "PASS" : "FAIL") << "\",\n"

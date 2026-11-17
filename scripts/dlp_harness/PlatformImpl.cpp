@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -46,6 +47,8 @@ static bool gVerboseLog = false;
 static melonDS::NDS* gConsoles[16] {};
 static int gNumConsoles = 0;
 static std::atomic<bool> gWorkerInFrame[16] {};
+static std::atomic<bool> gHostWaitingReplies {false};
+static std::atomic<bool> gStopAll {false};
 static std::atomic<u64> gFrameStartArm9[16] {};
 static std::atomic<bool> gStage2Active {false};
 static std::atomic<u16> gMissedReplyMask {0};
@@ -53,14 +56,32 @@ static std::mutex gLateReplyMtx;
 static u8 gLateReplyBuf[16][1024] {};
 static int gLateReplyLen[16] {};
 static std::atomic<u64> gLastCmdTimestamp {0};
+static std::atomic<u64> gLastHostUS {0};
+static std::atomic<u64> gLastHostArm9 {0};
+static std::atomic<u64> gGuestRefUS[16] {};
+static std::atomic<u64> gGuestRefArm9[16] {};
 static std::atomic<u64> gStatCmdSent {0};
 static std::atomic<u64> gStatHostPktRecv {0};
 static std::atomic<u64> gStatReplySent {0};
 static std::atomic<u64> gStatReplyRecv {0};
+struct BufferedRxPkt
+{
+    int len = 0;
+    u64 ts = 0;
+    u8 data[2048] {};
+};
+static std::mutex gRxQueueMtx;
+static std::deque<BufferedRxPkt> gRxQueue[16];
+static std::function<bool()> gPumpGuestsCb;
 static thread_local int tCurrentInst = -1;
 static thread_local bool tInRecvReplies = false;
 
 } // namespace melonDS::Platform
+
+void Harness_SetPumpGuestsCallback(std::function<bool()> cb)
+{
+    melonDS::Platform::gPumpGuestsCb = std::move(cb);
+}
 
 void Harness_GetMPStats(std::uint64_t& cmdSent, std::uint64_t& hostRecv, std::uint64_t& replySent, std::uint64_t& replyRecv)
 {
@@ -73,8 +94,9 @@ void Harness_GetMPStats(std::uint64_t& cmdSent, std::uint64_t& hostRecv, std::ui
 void Harness_SetStage2Active(bool active)
 {
     melonDS::Platform::gStage2Active.store(active, std::memory_order_release);
-    if (!active)
-        melonDS::Platform::gMissedReplyMask.store(0, std::memory_order_release);
+    melonDS::Platform::gMissedReplyMask.store(0, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(melonDS::Platform::gLateReplyMtx);
+    std::memset(melonDS::Platform::gLateReplyLen, 0, sizeof(melonDS::Platform::gLateReplyLen));
 }
 
 void Harness_RegisterConsoles(int count, melonDS::NDS** ptrs)
@@ -87,6 +109,7 @@ void Harness_RegisterConsoles(int count, melonDS::NDS** ptrs)
 void Harness_InitLocalMP(int recvTimeoutMs, bool verboseLog)
 {
     melonDS::Platform::gVerboseLog = verboseLog;
+    melonDS::Platform::gStopAll.store(false, std::memory_order_relaxed);
     for (int i = 0; i < 16; ++i)
         melonDS::Platform::gWorkerInFrame[i].store(false, std::memory_order_relaxed);
     if (!melonDS::Platform::gLocalMP)
@@ -97,8 +120,18 @@ void Harness_InitLocalMP(int recvTimeoutMs, bool verboseLog)
     melonDS::Platform::gLocalMP->SetRecvTimeout(recvTimeoutMs > 0 ? recvTimeoutMs : 1);
 }
 
+void Harness_NotifyStop()
+{
+    melonDS::Platform::gStopAll.store(true, std::memory_order_release);
+}
+
 void Harness_ShutdownLocalMP()
 {
+    {
+        std::lock_guard<std::mutex> lk(melonDS::Platform::gRxQueueMtx);
+        for (int i = 0; i < 16; ++i)
+            melonDS::Platform::gRxQueue[i].clear();
+    }
     delete melonDS::Platform::gLocalMP;
     melonDS::Platform::gLocalMP = nullptr;
 }
@@ -303,61 +336,34 @@ void Semaphore_Wait(Semaphore* sema)
 bool Semaphore_TryWait(Semaphore* sema, int timeout_ms)
 {
     if (!sema) return false;
-    std::unique_lock<std::mutex> lk(sema->mtx);
-    if (sema->count > 0)
     {
-        sema->count--;
-        return true;
-    }
-    if (timeout_ms <= 0)
-        return false;
-
-    if (!tInRecvReplies)
-    {
-        // Guest polling CheckRX(2): keep Guest from racing ahead of Host to end-of-frame barrier before Host sends MP CMDs!
-        if (tCurrentInst > 0 && gConsoles[0] && gConsoles[tCurrentInst])
+        std::lock_guard<std::mutex> lk(sema->mtx);
+        if (sema->count > 0)
         {
-            const u64 guestProg = gConsoles[tCurrentInst]->ARM9Timestamp -
-                                  gFrameStartArm9[tCurrentInst].load(std::memory_order_relaxed);
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(2500);
-            while (sema->count == 0 &&
-                   gWorkerInFrame[0].load(std::memory_order_acquire) &&
-                   guestProg > (gConsoles[0]->ARM9Timestamp - gFrameStartArm9[0].load(std::memory_order_relaxed)) + 3072ULL)
-            {
-                if (std::chrono::steady_clock::now() >= deadline)
-                    break;
-                lk.unlock();
-                std::this_thread::yield();
-                lk.lock();
-            }
+            sema->count--;
+            return true;
+        }
+    }
+    if (timeout_ms > 0 && tInRecvReplies && gPumpGuestsCb)
+    {
+        bool savedInRecv = tInRecvReplies;
+        tInRecvReplies = false;
+        for (int attempt = 0; attempt < 700; ++attempt)
+        {
+            bool progressed = gPumpGuestsCb();
+            std::lock_guard<std::mutex> lk(sema->mtx);
             if (sema->count > 0)
             {
                 sema->count--;
+                tInRecvReplies = savedInRecv;
                 return true;
             }
-        }
-        return false;
-    }
-
-    // Host waiting for MP replies from Guest(s): wait up to 2000us while Guest(s) are still inside their active frame.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(2000);
-    while (sema->count == 0)
-    {
-        bool anyPeerInFrame = false;
-        for (int i = 0; i < gNumConsoles; ++i)
-        {
-            if (i != tCurrentInst && gWorkerInFrame[i].load(std::memory_order_acquire))
-            {
-                anyPeerInFrame = true;
+            if (!progressed)
                 break;
-            }
         }
-        if (!anyPeerInFrame || std::chrono::steady_clock::now() >= deadline)
-            return false;
-        sema->cv.wait_for(lk, std::chrono::microseconds(40), [&] { return sema->count > 0; });
+        tInRecvReplies = savedInRecv;
     }
-    sema->count--;
-    return true;
+    return false;
 }
 
 void Semaphore_Post(Semaphore* sema, int count)
@@ -416,55 +422,161 @@ void MP_End(void* userdata)
     if (gLocalMP) gLocalMP->End(InstId(userdata));
 }
 
+static inline void RecordHostPacketClock(int inst, u64 hostUS)
+{
+    if (inst == 0 && gConsoles[0])
+    {
+        gLastHostUS.store(hostUS, std::memory_order_relaxed);
+        gLastHostArm9.store(gConsoles[0]->ARM9Timestamp, std::memory_order_release);
+    }
+}
+
+static inline void PaceHostToGuests(int inst)
+{
+    if (inst != 0 || !gConsoles[0])
+        return;
+    const u64 hostTs = gConsoles[0]->ARM9Timestamp;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(15000);
+    for (int g = 1; g < gNumConsoles; ++g)
+    {
+        if (!gConsoles[g])
+            continue;
+        while (!gStopAll.load(std::memory_order_acquire))
+        {
+            const u64 guestTs = gConsoles[g]->ARM9Timestamp;
+            if (hostTs + 24576ULL <= guestTs || std::chrono::steady_clock::now() >= deadline)
+                break;
+            std::this_thread::yield();
+        }
+    }
+}
+
 int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata)
 {
-    return gLocalMP ? gLocalMP->SendPacket(InstId(userdata), data, len, timestamp) : 0;
+    int inst = InstId(userdata);
+    RecordHostPacketClock(inst, timestamp);
+    return gLocalMP ? gLocalMP->SendPacket(inst, data, len, timestamp) : 0;
+}
+
+static inline void DrainAllPacketFifos()
+{
+    if (!gLocalMP) return;
+    // Once Stage 2 MKDS is active, guests have WIFI ON and drain their own PacketReadOffset[1..N] every MP frame;
+    // only Console 0 (Host, which reads FIFO 1 via MP_RecvReplies) needs its unused FIFO 0 read offset advanced!
+    const int maxConsole = gStage2Active.load(std::memory_order_acquire)
+                         ? 1
+                         : ((gNumConsoles > 0 && gNumConsoles <= 16) ? gNumConsoles : 16);
+    std::lock_guard<std::mutex> lk(gRxQueueMtx);
+    for (int c = 0; c < maxConsole; ++c)
+    {
+        for (;;)
+        {
+            BufferedRxPkt pkt;
+            int rxlen = gLocalMP->RecvPacket(c, pkt.data, &pkt.ts);
+            if (rxlen <= 0)
+                break;
+            pkt.len = rxlen;
+            gRxQueue[c].push_back(pkt);
+            while (gRxQueue[c].size() > 512)
+                gRxQueue[c].pop_front();
+        }
+    }
 }
 
 int MP_RecvPacket(u8* data, u64* timestamp, void* userdata)
 {
-    return gLocalMP ? gLocalMP->RecvPacket(InstId(userdata), data, timestamp) : 0;
+    if (!gLocalMP) return 0;
+    int inst = InstId(userdata);
+    int rxlen = 0;
+    bool fromQueue = false;
+    if (inst >= 0 && inst < 16)
+    {
+        std::lock_guard<std::mutex> lk(gRxQueueMtx);
+        if (!gRxQueue[inst].empty())
+        {
+            const auto& front = gRxQueue[inst].front();
+            rxlen = front.len;
+            std::memcpy(data, front.data, rxlen);
+            if (timestamp) *timestamp = front.ts;
+            gRxQueue[inst].pop_front();
+            fromQueue = true;
+        }
+    }
+    if (!fromQueue)
+    {
+        rxlen = gLocalMP->RecvPacket(inst, data, timestamp);
+    }
+    if (rxlen >= 14 && inst > 0 && inst < 16 && timestamp && *timestamp && data &&
+        (data[0xC] & 0xFF) == 0x10 && gConsoles[inst])
+    {
+        // Wifi.cpp sets Guest.USTimestamp = *timestamp upon receiving 0x0010 Association Response.
+        gGuestRefUS[inst].store(*timestamp, std::memory_order_relaxed);
+        gGuestRefArm9[inst].store(gConsoles[inst]->ARM9Timestamp, std::memory_order_release);
+    }
+    return rxlen;
 }
 
 int MP_SendCmd(u8* data, int len, u64 timestamp, void* userdata)
 {
-    gStatCmdSent.fetch_add(1, std::memory_order_relaxed);
+    int inst = InstId(userdata);
+    RecordHostPacketClock(inst, timestamp);
+    u64 n = gStatCmdSent.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (inst == 0 && (n & 31ULL) == 0)
+    {
+        // Prevent continuous MP_SendCmd/MP_SendAck writes from lapping PacketReadOffset[0..N] in LocalMP's 64 KiB ring!
+        DrainAllPacketFifos();
+    }
     gLastCmdTimestamp.store(timestamp, std::memory_order_release);
     gMissedReplyMask.store(0, std::memory_order_release);
-    return gLocalMP ? gLocalMP->SendCmd(InstId(userdata), data, len, timestamp) : 0;
+    return gLocalMP ? gLocalMP->SendCmd(inst, data, len, timestamp) : 0;
 }
 
 int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid, void* userdata)
 {
-    if (len > 0 && aid > 0) gStatReplySent.fetch_add(1, std::memory_order_relaxed);
-    if (gStage2Active.load(std::memory_order_acquire) &&
-        data && len >= 14 && len <= 1024 && aid > 0 && aid < 16 &&
-        (gMissedReplyMask.load(std::memory_order_acquire) & (1u << aid)) != 0)
+    int inst = InstId(userdata);
+    if (len > 0 && aid > 0)
     {
-        u16 framectl = *reinterpret_cast<const u16*>(&data[0xC]);
-        if (framectl != 0x0158) // Non-default WM data reply sent across VBlank right after MP_RecvReplies timed out!
-        {
-            std::lock_guard<std::mutex> lk(gLateReplyMtx);
-            std::memcpy(gLateReplyBuf[aid], data, len);
-            gLateReplyLen[aid] = len;
-            gMissedReplyMask.fetch_and(static_cast<u16>(~(1u << aid)), std::memory_order_acq_rel);
-        }
+        gStatReplySent.fetch_add(1, std::memory_order_relaxed);
     }
     u64 cmdTs = gLastCmdTimestamp.load(std::memory_order_acquire);
     u64 replyTs = (timestamp < cmdTs) ? cmdTs : timestamp;
-    return gLocalMP ? gLocalMP->SendReply(InstId(userdata), data, len, replyTs, aid) : 0;
+    return gLocalMP ? gLocalMP->SendReply(inst, data, len, replyTs, aid) : 0;
 }
 
 int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata)
 {
-    return gLocalMP ? gLocalMP->SendAck(InstId(userdata), data, len, timestamp) : 0;
+    int inst = InstId(userdata);
+    RecordHostPacketClock(inst, timestamp);
+    return gLocalMP ? gLocalMP->SendAck(inst, data, len, timestamp) : 0;
 }
 
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 {
     if (!gLocalMP) return 0;
-    int len = gLocalMP->RecvHostPacket(InstId(userdata), data, timestamp);
-    if (len > 0) gStatHostPktRecv.fetch_add(1, std::memory_order_relaxed);
+    int inst = InstId(userdata);
+    int len = 0;
+    bool fromQueue = false;
+    if (inst >= 0 && inst < 16)
+    {
+        std::lock_guard<std::mutex> lk(gRxQueueMtx);
+        if (!gRxQueue[inst].empty())
+        {
+            const auto& front = gRxQueue[inst].front();
+            len = front.len;
+            std::memcpy(data, front.data, len);
+            if (timestamp) *timestamp = front.ts;
+            gRxQueue[inst].pop_front();
+            fromQueue = true;
+        }
+    }
+    if (!fromQueue)
+    {
+        len = gLocalMP->RecvHostPacket(inst, data, timestamp);
+    }
+    if (len > 0)
+    {
+        gStatHostPktRecv.fetch_add(1, std::memory_order_relaxed);
+    }
     return len;
 }
 
@@ -472,30 +584,13 @@ u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidmask, void* userdata)
 {
     if (!gLocalMP) return 0;
     tInRecvReplies = true;
+    gHostWaitingReplies.store(true, std::memory_order_release);
     // Note: Wifi.cpp calls MP_SendCmd at T_start (CurPhase 0), then calls MP_RecvReplies at T_end = T_start + framelen*4 (CurPhase 1).
     // Passing T_start (gLastCmdTimestamp) prevents LocalMP::RecvReplies from falsely discarding replies to >8-byte CMDs via `< timestamp - 32`!
     u64 cmdTs = gLastCmdTimestamp.load(std::memory_order_acquire);
     u16 res = gLocalMP->RecvReplies(InstId(userdata), data, cmdTs ? cmdTs : timestamp, aidmask);
+    gHostWaitingReplies.store(false, std::memory_order_release);
     tInRecvReplies = false;
-    u16 missed = gStage2Active.load(std::memory_order_acquire) ? static_cast<u16>(aidmask & ~res) : 0;
-    gMissedReplyMask.store(missed, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> lk(gLateReplyMtx);
-        for (int aid = 1; aid < 16; ++aid)
-        {
-            if (gLateReplyLen[aid] > 0 && (aidmask & (1 << aid)))
-            {
-                u8* dst = &data[(aid - 1) * 1024];
-                bool isDefaultOrMissing = !(res & (1 << aid)) || (*reinterpret_cast<const u16*>(&dst[0xC]) == 0x0158);
-                if (isDefaultOrMissing)
-                {
-                    std::memcpy(dst, gLateReplyBuf[aid], gLateReplyLen[aid]);
-                    res |= static_cast<u16>(1 << aid);
-                    gLateReplyLen[aid] = 0;
-                }
-            }
-        }
-    }
     if (res != 0) gStatReplyRecv.fetch_add(1, std::memory_order_relaxed);
     return res;
 }
