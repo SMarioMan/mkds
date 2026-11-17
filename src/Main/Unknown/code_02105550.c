@@ -259,7 +259,7 @@ int GetSndHeapsBufferSize(int a) {
 }
 
 int GetSndInitBufferSize(int a) {
-    return a == 2 ? 0xaf000 : 0xc400;
+    return a == 2 ? 0xb8000 : 0xc400;
 }
 
 void ReleaseSndHeaps(void) {

@@ -56,10 +56,15 @@ void ChangeSoundOutputEffect(s32 type) {
 }
 
 void StartSeqAtVolume(u32 seqNo, u32 volume, NNSSndSeqPlayer **handle) {
+    NNSSndArcSeqInfo *seqInfo;
     if (*handle != NULL) {
         NNS_SndPlayerStopSeq(handle, 0);
     }
-    NNS_SndArcGetFileAddress(NNS_SndArcGetSeqInfo(seqNo)->mFileId);
+    seqInfo = NNS_SndArcGetSeqInfo(seqNo);
+    if (seqInfo == NULL) {
+        return;
+    }
+    NNS_SndArcGetFileAddress(seqInfo->mFileId);
     NNS_SndArcPlayerStartSeq(handle, seqNo);
     NNS_SndPlayerSetVolume(handle, volume);
 }

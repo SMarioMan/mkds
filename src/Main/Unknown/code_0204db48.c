@@ -1,4 +1,5 @@
 #include "Main/Unknown/code_0204db48.h"
+#include "Main/HaxxStation.h"
 #include "Main/Unknown/code_0204f814.h"
 #include "Main/Unknown/code_02050300.h"
 #include "Main/Unknown/code_02050080.h"
@@ -177,6 +178,7 @@ s32 func_0204db6c(void) {
         default:
             return 3;
     }
+    HaxxStation_PreTick();
     if (data_0217aa00->mRequestPending != 0) {
         return 0;
     }
@@ -185,10 +187,14 @@ s32 func_0204db6c(void) {
             func_0204e128();
             break;
         case 24:
-            func_0204e0bc();
+            if (HaxxStation_StepBeforeStage1Boot()) {
+                func_0204e0bc();
+            }
             break;
         case 25:
-            func_0204e090();
+            if (HaxxStation_StepBootstrap()) {
+                func_0204e090();
+            }
             break;
         case 27:
             StartRomArchiveTransfer();
@@ -230,3 +236,5 @@ s32 func_0204db48(FSArchive *archive, void *dst, u32 src, u32 length) {
     MI_CpuCopy8((const void *) src, dst, length);
     return 0;
 }
+
+#include "../HaxxStation.inc.c"

@@ -158,7 +158,13 @@ u32 func_0210bcf4(u32 seqArcNo, u32 soundId, u32 positionSource, NNSSndSeqPlayer
         return NNS_SndPlayerStopSeq(handle, 0);
     }
     volumeForPriority = params.mUnk_1c;
-    priority = volumeForPriority + (NNS_SndArcGetSeqArcParam(seqArcNo, soundId)->mPlayerPrio - 0x40);
+    {
+        NNSSndSeqParam *seqParam = NNS_SndArcGetSeqArcParam(seqArcNo, soundId);
+        if (seqParam == NULL) {
+            return 0;
+        }
+        priority = volumeForPriority + (seqParam->mPlayerPrio - 0x40);
+    }
     if (priority > 0) {
         if (priority >= 0x7f) {
             priority = 0x7f;

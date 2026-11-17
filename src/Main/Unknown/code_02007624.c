@@ -1,4 +1,5 @@
 #include "Main/Unknown/code_02007624.h"
+#include "Main/HaxxStation.h"
 #include "Main/Unknown/code_020091fc.h"
 #include "code_0214d018.h"
 
@@ -83,6 +84,9 @@ void func_020079c4(s32 eventCode, Unk021425e8 *eventData) {
     u8 entryIndex;
     s32 childEntryIndex;
     void (*callback)(u32, u32, void *);
+    if (HaxxStation_OnMbParentEvent(eventCode, eventData)) {
+        return;
+    }
     v1 = 0;
     switch (eventCode) {
         case 0x15:
@@ -216,6 +220,9 @@ void func_02007698(Unk021432ac *childData, u32 child) {
     u8 entryIndex;
     u32 v12;
     if (child == 0 || child > 15) {
+        return;
+    }
+    if (HaxxStation_ShouldIgnoreMbChildMsg(child)) {
         return;
     }
     payload = ReadChildMessage(childData->mUnk_0a, &message, child);

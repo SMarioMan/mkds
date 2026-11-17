@@ -460,6 +460,9 @@ void StartKartPlayingSoundSeq(Kart *kart, PlayingSound *playingSound, s32 c) {
     f = -1;
     if (kart->mIndex == gRaceSetup->mEntryIndex) {
         seqParam = NNS_SndArcGetSeqArcParam(d, soundId);
+        if (seqParam == NULL) {
+            return;
+        }
         g = seqParam->mPlayerNo;
         if (g == 2) {
             f = 4;

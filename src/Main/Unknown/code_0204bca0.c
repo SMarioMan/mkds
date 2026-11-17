@@ -1,4 +1,5 @@
 #include "Main/Unknown/code_0204bca0.h"
+#include "Main/HaxxStation.h"
 
 #include "03/code_021b94b8.h"
 #include "os_thread.h"
@@ -143,6 +144,12 @@ void CreateRomArchiveBlock(FSFile *file, s32 appendOverlays) {
         }
     }
     if (noFile != FALSE) {
+        static const char *sChildOverlayPathsHaxx[4] = {
+            "/haxx/mb_child_ov0.bin",
+            "/haxx/mb_child_ov1.bin",
+            "/haxx/mb_child_ov2.bin",
+            "/haxx/mb_child_ov3.bin",
+        };
         static const char *sChildOverlayPaths[4] = {
             "/data/Boot/mb_child_ov0.bin",
             "/data/Boot/mb_child_ov1.bin",
@@ -151,38 +158,39 @@ void CreateRomArchiveBlock(FSFile *file, s32 appendOverlays) {
         };
         static const struct {
             const char *srcPath;
-            const char *dstPath;
+            const char *haxxDstPath;
+            const char *legacyDstPath;
         } sChildDArchiveRedirects[30] = {
-            {"/data/Course/desert_course.carc", "/data/Course/desert_courseD.carc"},
-            {"/data/Course/desert_courseTex.carc", "/data/Course/desert_courseDTex.carc"},
-            {"/data/Course/town_course.carc", "/data/Course/town_courseD.carc"},
-            {"/data/Course/town_courseTex.carc", "/data/Course/town_courseDTex.carc"},
-            {"/data/Course/pinball_course.carc", "/data/Course/pinball_courseD.carc"},
-            {"/data/Course/pinball_courseTex.carc", "/data/Course/pinball_courseDTex.carc"},
-            {"/data/Course/ridge_course.carc", "/data/Course/ridge_courseD.carc"},
-            {"/data/Course/ridge_courseTex.carc", "/data/Course/ridge_courseDTex.carc"},
-            {"/data/Course/snow_course.carc", "/data/Course/snow_courseD.carc"},
-            {"/data/Course/snow_courseTex.carc", "/data/Course/snow_courseDTex.carc"},
-            {"/data/Course/mario_course.carc", "/data/Course/mario_courseD.carc"},
-            {"/data/Course/mario_courseTex.carc", "/data/Course/mario_courseDTex.carc"},
-            {"/data/Course/airship_course.carc", "/data/Course/airship_courseD.carc"},
-            {"/data/Course/airship_courseTex.carc", "/data/Course/airship_courseDTex.carc"},
-            {"/data/Course/stadium_course.carc", "/data/Course/stadium_courseD.carc"},
-            {"/data/Course/stadium_courseTex.carc", "/data/Course/stadium_courseDTex.carc"},
-            {"/data/Course/garden_course.carc", "/data/Course/garden_courseD.carc"},
-            {"/data/Course/garden_courseTex.carc", "/data/Course/garden_courseDTex.carc"},
-            {"/data/Course/koopa_course.carc", "/data/Course/koopa_courseD.carc"},
-            {"/data/Course/koopa_courseTex.carc", "/data/Course/koopa_courseDTex.carc"},
-            {"/data/Course/rainbow_course.carc", "/data/Course/rainbow_courseD.carc"},
-            {"/data/Course/rainbow_courseTex.carc", "/data/Course/rainbow_courseDTex.carc"},
-            {"/data/Course/old_donut_sfc.carc", "/data/Course/old_donut_sfcD.carc"},
-            {"/data/Course/old_donut_sfcTex.carc", "/data/Course/old_donut_sfcDTex.carc"},
-            {"/data/Course/old_luigi_agb.carc", "/data/Course/old_luigi_agbD.carc"},
-            {"/data/Course/old_luigi_agbTex.carc", "/data/Course/old_luigi_agbDTex.carc"},
-            {"/data/Course/old_kinoko_gc.carc", "/data/Course/old_kinoko_gcD.carc"},
-            {"/data/Course/old_kinoko_gcTex.carc", "/data/Course/old_kinoko_gcDTex.carc"},
-            {"/data/Course/old_yoshi_gc.carc", "/data/Course/old_yoshi_gcD.carc"},
-            {"/data/Course/old_yoshi_gcTex.carc", "/data/Course/old_yoshi_gcDTex.carc"},
+            {"/data/Course/desert_course.carc", "/haxx/Course/desert_courseD.carc", "/data/Course/desert_courseD.carc"},
+            {"/data/Course/desert_courseTex.carc", "/haxx/Course/desert_courseDTex.carc", "/data/Course/desert_courseDTex.carc"},
+            {"/data/Course/town_course.carc", "/haxx/Course/town_courseD.carc", "/data/Course/town_courseD.carc"},
+            {"/data/Course/town_courseTex.carc", "/haxx/Course/town_courseDTex.carc", "/data/Course/town_courseDTex.carc"},
+            {"/data/Course/pinball_course.carc", "/haxx/Course/pinball_courseD.carc", "/data/Course/pinball_courseD.carc"},
+            {"/data/Course/pinball_courseTex.carc", "/haxx/Course/pinball_courseDTex.carc", "/data/Course/pinball_courseDTex.carc"},
+            {"/data/Course/ridge_course.carc", "/haxx/Course/ridge_courseD.carc", "/data/Course/ridge_courseD.carc"},
+            {"/data/Course/ridge_courseTex.carc", "/haxx/Course/ridge_courseDTex.carc", "/data/Course/ridge_courseDTex.carc"},
+            {"/data/Course/snow_course.carc", "/haxx/Course/snow_courseD.carc", "/data/Course/snow_courseD.carc"},
+            {"/data/Course/snow_courseTex.carc", "/haxx/Course/snow_courseDTex.carc", "/data/Course/snow_courseDTex.carc"},
+            {"/data/Course/mario_course.carc", "/haxx/Course/mario_courseD.carc", "/data/Course/mario_courseD.carc"},
+            {"/data/Course/mario_courseTex.carc", "/haxx/Course/mario_courseDTex.carc", "/data/Course/mario_courseDTex.carc"},
+            {"/data/Course/airship_course.carc", "/haxx/Course/airship_courseD.carc", "/data/Course/airship_courseD.carc"},
+            {"/data/Course/airship_courseTex.carc", "/haxx/Course/airship_courseDTex.carc", "/data/Course/airship_courseDTex.carc"},
+            {"/data/Course/stadium_course.carc", "/haxx/Course/stadium_courseD.carc", "/data/Course/stadium_courseD.carc"},
+            {"/data/Course/stadium_courseTex.carc", "/haxx/Course/stadium_courseDTex.carc", "/data/Course/stadium_courseDTex.carc"},
+            {"/data/Course/garden_course.carc", "/haxx/Course/garden_courseD.carc", "/data/Course/garden_courseD.carc"},
+            {"/data/Course/garden_courseTex.carc", "/haxx/Course/garden_courseDTex.carc", "/data/Course/garden_courseDTex.carc"},
+            {"/data/Course/koopa_course.carc", "/haxx/Course/koopa_courseD.carc", "/data/Course/koopa_courseD.carc"},
+            {"/data/Course/koopa_courseTex.carc", "/haxx/Course/koopa_courseDTex.carc", "/data/Course/koopa_courseDTex.carc"},
+            {"/data/Course/rainbow_course.carc", "/haxx/Course/rainbow_courseD.carc", "/data/Course/rainbow_courseD.carc"},
+            {"/data/Course/rainbow_courseTex.carc", "/haxx/Course/rainbow_courseDTex.carc", "/data/Course/rainbow_courseDTex.carc"},
+            {"/data/Course/old_donut_sfc.carc", "/haxx/Course/old_donut_sfcD.carc", "/data/Course/old_donut_sfcD.carc"},
+            {"/data/Course/old_donut_sfcTex.carc", "/haxx/Course/old_donut_sfcDTex.carc", "/data/Course/old_donut_sfcDTex.carc"},
+            {"/data/Course/old_luigi_agb.carc", "/haxx/Course/old_luigi_agbD.carc", "/data/Course/old_luigi_agbD.carc"},
+            {"/data/Course/old_luigi_agbTex.carc", "/haxx/Course/old_luigi_agbDTex.carc", "/data/Course/old_luigi_agbDTex.carc"},
+            {"/data/Course/old_kinoko_gc.carc", "/haxx/Course/old_kinoko_gcD.carc", "/data/Course/old_kinoko_gcD.carc"},
+            {"/data/Course/old_kinoko_gcTex.carc", "/haxx/Course/old_kinoko_gcDTex.carc", "/data/Course/old_kinoko_gcDTex.carc"},
+            {"/data/Course/old_yoshi_gc.carc", "/haxx/Course/old_yoshi_gcD.carc", "/data/Course/old_yoshi_gcD.carc"},
+            {"/data/Course/old_yoshi_gcTex.carc", "/haxx/Course/old_yoshi_gcDTex.carc", "/data/Course/old_yoshi_gcDTex.carc"},
         };
         FSFile ovtFile;
         FSFileID ovFileId;
@@ -192,25 +200,30 @@ void CreateRomArchiveBlock(FSFile *file, s32 appendOverlays) {
         u32 fatEntryCount;
         s32 ovIdx;
 
-        FS_InitFile(&ovtFile);
-        if (FS_OpenFile(&ovtFile, (const u8 *) "/data/Boot/mb_child_ovt.bin") != 0) {
-            ovEntries = (OverlayTableEntry *) (tablePointers[2] + 1);
-            if (FS_ReadFile(&ovtFile, ovEntries, 0x80) == 0x80) {
-                *tablePointers[2] = 0x80;
-                for (ovIdx = 0; ovIdx < 4; ovIdx++) {
-                    if (FS_ConvertPathToFileID(&ovFileId, (const u8 *) sChildOverlayPaths[ovIdx]) != 0) {
-                        ovEntries[ovIdx].mFileId = ovFileId.mFileId;
+        if (!HaxxStation_IsEnabled()) {
+            FS_InitFile(&ovtFile);
+            if (FS_OpenFile(&ovtFile, (const u8 *) "/haxx/mb_child_ovt.bin") != 0 ||
+                FS_OpenFile(&ovtFile, (const u8 *) "/data/Boot/mb_child_ovt.bin") != 0) {
+                ovEntries = (OverlayTableEntry *) (tablePointers[2] + 1);
+                if (FS_ReadFile(&ovtFile, ovEntries, 0x80) == 0x80) {
+                    *tablePointers[2] = 0x80;
+                    for (ovIdx = 0; ovIdx < 4; ovIdx++) {
+                        if (FS_ConvertPathToFileID(&ovFileId, (const u8 *) sChildOverlayPathsHaxx[ovIdx]) != 0 ||
+                            FS_ConvertPathToFileID(&ovFileId, (const u8 *) sChildOverlayPaths[ovIdx]) != 0) {
+                            ovEntries[ovIdx].mFileId = ovFileId.mFileId;
+                        }
                     }
                 }
+                FS_CloseFile(&ovtFile);
             }
-            FS_CloseFile(&ovtFile);
         }
 
         fatWords = tablePointers[0] + 1;
         fatEntryCount = *tablePointers[0] >> 3;
         for (ovIdx = 0; ovIdx < 30; ovIdx++) {
             if (FS_ConvertPathToFileID(&ovFileId, (const u8 *) sChildDArchiveRedirects[ovIdx].srcPath) != 0 &&
-                FS_ConvertPathToFileID(&dstFileId, (const u8 *) sChildDArchiveRedirects[ovIdx].dstPath) != 0 &&
+                (FS_ConvertPathToFileID(&dstFileId, (const u8 *) sChildDArchiveRedirects[ovIdx].haxxDstPath) != 0 ||
+                 FS_ConvertPathToFileID(&dstFileId, (const u8 *) sChildDArchiveRedirects[ovIdx].legacyDstPath) != 0) &&
                 ovFileId.mFileId < fatEntryCount && dstFileId.mFileId < fatEntryCount) {
                 fatWords[ovFileId.mFileId * 2 + 0] = fatWords[dstFileId.mFileId * 2 + 0];
                 fatWords[ovFileId.mFileId * 2 + 1] = fatWords[dstFileId.mFileId * 2 + 1];

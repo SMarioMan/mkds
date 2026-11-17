@@ -113,7 +113,12 @@ void func_0210cc3c(SoundSource *source) {
 }
 
 static inline s32 func_0210ca4c_inline(u32 volumeForPriority, u8 seqArcNo, u16 soundId) {
-    s32 priority = volumeForPriority + (NNS_SndArcGetSeqArcParam(seqArcNo, soundId)->mPlayerPrio - 0x40);
+    NNSSndSeqParam *seqParam = NNS_SndArcGetSeqArcParam(seqArcNo, soundId);
+    s32 priority;
+    if (seqParam == NULL) {
+        return 0;
+    }
+    priority = volumeForPriority + (seqParam->mPlayerPrio - 0x40);
     if (priority > 0) {
         if (priority >= 0x7f) {
             priority = 0x7f;

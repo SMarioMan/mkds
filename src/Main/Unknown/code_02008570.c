@@ -57,7 +57,8 @@ int func_02008570(FSFile *file, void *buffer, u32 bufferSize) {
             seekOffset = func_02008570_inline(header);
         } else {
             FS_InitFile(&openedFile);
-            if (FS_OpenFile(&openedFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0) {
+            if (FS_OpenFile(&openedFile, (const u8 *) "/haxx/mb_child_usa.bin") != 0 ||
+                FS_OpenFile(&openedFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0) {
                 openedHere = TRUE;
                 usePackedChild = TRUE;
                 activeFile = &openedFile;

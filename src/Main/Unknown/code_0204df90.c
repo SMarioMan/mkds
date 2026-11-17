@@ -1,4 +1,5 @@
 #include "Main/Unknown/code_0204df90.h"
+#include "Main/HaxxStation.h"
 #include "Main/Unknown/code_02001000.h"
 #include "Main/Unknown/code_02009cc8.h"
 #include "Main/Unknown/code_0200aeb4.h"
@@ -35,6 +36,7 @@ void func_0204e928(void *heap, u32 b, void *bmg) {
         data_0217aa00->mUnk_1658 = HeapAllocAligned(heap, data_0217aa00->mUnk_168c, 0x20);
         func_0204ea14(bmg);
         data_0217aa00->mUnk_1668 = HeapAllocAligned(heap, 0x4c0, 0x20);
+        HaxxStation_AllocSceneBuffers(heap);
     } else {
         data_0217aa00->mUnk_168c = 0;
         data_0217aa00->mUnk_1658 = 0;
@@ -45,6 +47,9 @@ void func_0204e928(void *heap, u32 b, void *bmg) {
 
 void func_0204e6e8(u32 index, u32 code, Unk0204e4d8 *c) {
     data_0217aa00->mUnk_1658_view.mUnk_14[index] = code;
+    if (HaxxStation_HandleMbCallback(index, code, c)) {
+        return;
+    }
     if (data_0217aa00->mUnk_000c == 0x1b && code != 0xc) {
         return;
     }
@@ -156,7 +161,9 @@ void func_0204e568(void) {
     b.mUnk_00_4 = 8;
     MI_CpuCopy8(data_0217aa08->mFirstBlock->mPlayerName, b.mUnk_02, 0x14);
     data_0217aa00->mUnk_1690 = func_02052c5c(1);
-    if (InitWirelessWork(data_0217aa00->mUnk_165c, (Unk02009ff4 *) &b, 0x25, data_0217aa00->mUnk_1690, 2) != 0) {
+    HaxxStation_OnStage1ParentInit();
+    if (InitWirelessWork(data_0217aa00->mUnk_165c, (Unk02009ff4 *) &b, HaxxStation_GetStage1Ggid(),
+                         data_0217aa00->mUnk_1690, 2) != 0) {
         func_02050e60(5);
     }
     SetMPLimits(0x1fe, 7);
@@ -398,6 +405,7 @@ void func_0204e0bc(void) {
 }
 
 void func_0204e090(void) {
+    HaxxStation_OnMbEndCalled();
     data_0217aa00->mUnk_000c = 0x1b;
     data_0217aa00->mRequestPending = 1;
     data_0217aa00->mUnk_1694 &= ~2;

@@ -1,4 +1,5 @@
 #include "Main/Unknown/code_02008880.h"
+#include "Main/HaxxStation.h"
 #include "code_02003024.h"
 #include "code_02003be0.h"
 #include "fs_file.h"
@@ -34,8 +35,11 @@ u32 func_02008880(FSFile *a) {
         FS_SeekFile(a, v4, 0);
     } else {
         FSFile childFile;
+        const u8 *childPath = HaxxStation_IsEnabled() ? (const u8 *) "/haxx/station_client.srl"
+                                                      : (const u8 *) "/haxx/mb_child_usa.bin";
         FS_InitFile(&childFile);
-        if (FS_OpenFile(&childFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0) {
+        if (FS_OpenFile(&childFile, childPath) != 0 ||
+            (!HaxxStation_IsEnabled() && FS_OpenFile(&childFile, (const u8 *) "/data/Boot/mb_child_usa.bin") != 0)) {
             if ((u32) FS_ReadFile(&childFile, &header, 0x60) >= 0x60) {
                 headerPtr = &header;
             }

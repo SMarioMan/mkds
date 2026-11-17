@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "region": "usa",
+  "game_code": "AMCE-00",
+  "git_base_head": "c1680030331c78c671a091e0d008ef6ace2e426a",
+  "configured_guests_arg": 1,
+  "dynamic_runtime_guest_support": "1..7",
+  "bootstrap_mode_default": "haxxstation",
+  "pinned_tools": {
+    "dspatch_commit": "32856c4b68c8e45d90fe135d5555a4596fbd2955",
+    "melonds_commit": "906e9ebb",
+    "container_image": "localhost/mkds-simple32:latest"
+  },
+  "verified_inputs": {
+    "mkds_usa_untrimmed_sha1": "691e00d9a5dd80b04f80cc7559503e8b06848785",
+    "download_station_vol1_usa_sha1": "f18b55f3e1259c03e10d0ecb549693b42905ceb5"
+  },
+  "m1_probe_audit": {
+    "station_rom_sha1": "f18b55f3e1259c03e10d0ecb549693b42905ceb5",
+    "wrapped_rom": "/work/mkds/build/haxxstation/station-probe-host.nds",
+    "wrapped_rom_size": 639716,
+    "wrapped_rom_sha256": "961719620b19612a30c89104b9076f5c8404357b12379a9d6bc8d1e696d27d62",
+    "signed_stage1_srl_size": 306824,
+    "signed_stage1_srl_sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b",
+    "signed_stage1_sgn_size": 155,
+    "signed_stage1_sgn_sha256": "118e179b7bdc26110444988d879f7baff9042c2111fc9cf6dd2485639794d1ff",
+    "signed_stage1_byte_identical": true,
+    "demomenu_size": 3980,
+    "demomenu_sha256": "367caa21522893f6933c4792805e301a4bec923a2a6bcf6234e8d446c38380fa",
+    "rom0000d_size": 22080,
+    "rom0000d_sha256": "483d5326a190df6ccf9e74799da31984d3d7ec166ed7448708795624e650c9b2",
+    "rom0000d_header_crc16": "0xd37a",
+    "exploit_arm9_header": {
+      "offset": "0x180",
+      "entry": "0x02004000",
+      "load_addr": "0x02332c40",
+      "size": "0x100"
+    },
+    "unwrapped_guest_ranges": {
+      "arm9_file_offset": "0x4000",
+      "arm9_entry": "0x02004000",
+      "arm9_ram": "0x02004000",
+      "arm9_size": 2328,
+      "arm7_file_offset": "0x4a00",
+      "arm7_entry": "0x02380000",
+      "arm7_ram": "0x02380000",
+      "arm7_size": 164,
+      "arm7_reloc_shim_used": false
+    },
+    "nitrofs_file_count": 10
+  },
+  "m2_guest_manifest": {
+    "guest_nds": "/work/mkds/build/haxxstation/mkds-simple32-guest.nds",
+    "guest_nds_size": 1139200,
+    "guest_nds_sha256": "326b7fba1e7f9817256295912b44eb4515965fdec0ccb12226cf40d630fc16ce",
+    "decoded_guest_arm9_size": 1547352,
+    "decoded_guest_arm9_sha256": "b4beddba0a637876f255a55404b8160783b3cc27467448deb1718827d3a92ea5",
+    "compressed_guest_arm9_size": 952904,
+    "compressed_guest_arm9_sha256": "20980fd25107b4077dd27425a7192e7b08c0bf105c1c6a173b35ace877eca834",
+    "arm7_size": 166308,
+    "arm7_sha256": "00778bd51d96ef14bf278d6b27f6ad063ddc6c343769ca643a5a042baa3f839f",
+    "autoload_hook_addr": "0x02000A58 -> 0x02001000",
+    "ovt_hmac_addr": "0x0217093c",
+    "ovt_hmac_sha1": "5a4e1ffdf090690daac5ab89829889cd276ecc22",
+    "overlay_signatures_sha1": [
+      "4aa87fe7ffadef0022e5c6febde96522e287fe21",
+      "887e64100b9d1386044e64ce331c33adb4d2a5f6",
+      "c0b0fd3eef0b86148e6441b47fcd3a9fe7935bb7",
+      "b4699f111a4b81d6edd046dca46b41200c8612df"
+    ],
+    "disassembly_proof": {
+      "GetSelectCupGridCupEnabled_addr": "0x0211a05c",
+      "GetSelectCupGridCupEnabled_snippet": "211a0a6:\t2401      \tmovs\tr4, #1\n211a0fc:\t2401      \tmovs\tr4, #1\n211a134:\t2f08      \tcmp\tr7, #8\n211a138:\t2401      \tmovs\tr4, #1\n211a15a:\t2401      \tmovs\tr4, #1",
+      "BuildCourseList_addr": "0x02046134",
+      "BuildCourseList_snippet": "20462ec:\te3580008 \tcmp\tr8, #8\n20462fc:\te3550020 \tcmp\tr5, #32"
+    },
+    "station_wrap_audit": {
+      "station_rom_sha1": "f18b55f3e1259c03e10d0ecb549693b42905ceb5",
+      "wrapped_rom": "/work/mkds/build/haxxstation/station-mkds-guest-host.nds",
+      "wrapped_rom_size": 1756388,
+      "wrapped_rom_sha256": "0ab8a4c562c298665c73af6edf128412045b513443e976400ed86b264e782a9e",
+      "signed_stage1_srl_size": 306824,
+      "signed_stage1_srl_sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b",
+      "signed_stage1_sgn_size": 155,
+      "signed_stage1_sgn_sha256": "118e179b7bdc26110444988d879f7baff9042c2111fc9cf6dd2485639794d1ff",
+      "signed_stage1_byte_identical": true,
+      "demomenu_size": 3980,
+      "demomenu_sha256": "9decaa127485de1d7b9cfe2668b6e1847396f0d97323a70d68e142eb48b454fb",
+      "rom0000d_size": 1138752,
+      "rom0000d_sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457",
+      "rom0000d_header_crc16": "0x007b",
+      "exploit_arm9_header": {
+        "offset": "0x180",
+        "entry": "0x02000800",
+        "load_addr": "0x02332c40",
+        "size": "0x100"
+      },
+      "unwrapped_guest_ranges": {
+        "arm9_file_offset": "0x4000",
+        "arm9_entry": "0x02000800",
+        "arm9_ram": "0x02000000",
+        "arm9_size": 952904,
+        "arm7_file_offset": "0xecc00",
+        "arm7_entry": "0x02380000",
+        "arm7_ram": "0x02380000",
+        "arm7_size": 166308,
+        "arm7_reloc_shim_used": false
+      },
+      "nitrofs_file_count": 10
+    }
+  },
+  "m6_final_host_manifest": {
+    "host_rom": "/work/mkds/build/haxxstation/mkds-simple32-haxxstation-host.nds",
+    "host_rom_size": 33554432,
+    "host_rom_sha256": "c8a386687b6c17ded0ff038a5ef19c3de64e558d9536bd2867a82af57a7444e3",
+    "game_code": "AMCE",
+    "signed_stage1_srl_fid": 616,
+    "signed_stage1_srl_sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b",
+    "signed_stage1_byte_identical": true,
+    "station_demomenu_fid": 617,
+    "station_demomenu_size": 3980,
+    "station_demomenu_sha256": "9decaa127485de1d7b9cfe2668b6e1847396f0d97323a70d68e142eb48b454fb",
+    "station_rom0000d_fid": 618,
+    "station_rom0000d_size": 1138752,
+    "station_rom0000d_sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457",
+    "original_retail_files_verified": 606,
+    "d_archive_redirects_verified": 30,
+    "provisional_layout_match": true,
+    "exec_and_ovt": {
+      "arm9_entry": 33556480,
+      "arm9_ram": 33554432,
+      "arm9_size": 953040,
+      "arm9_sha256": "899de33be9c9253b137039c364b28a8b8320638006201a618cdb5ce7e741f726",
+      "arm7_entry": 37224448,
+      "arm7_ram": 37224448,
+      "arm7_size": 166308,
+      "arm7_sha256": "00778bd51d96ef14bf278d6b27f6ad063ddc6c343769ca643a5a042baa3f839f",
+      "fnt_size": 12768,
+      "fnt_sha256": "1461791a75acb73d3a43a8befe11dc35a16dd335ab2e8bf45d4eac5249ee520d",
+      "fat_entry_count": 649,
+      "ovt9_size": 128,
+      "ovt9_sha256": "f74f8389eff4f7be1937730ee18d767a1e7d81c1e661f3e27d66abbc9d01b71c",
+      "ov0_to_3_sha256": [
+        "feafec1a8e4bb3dd514c1eaa274f7e12a2a9046644e169e378b19e6ceb56d84d",
+        "b5fdad81f296487dcb3dbe4ce1573006d362f6592a2e0c6b40ed2097655236cc",
+        "07d1d94d7d3269a1155925f01090a020e40387e8e8998fc3b4a1a3c633ca4d46",
+        "782142196f8a8b4b8471226f25d911d934f7734677569d717c58cc9a2b42f6fa"
+      ]
+    },
+    "added_file_ids": {
+      "/haxx/Course/airship_courseD.carc": {
+        "file_id": 619,
+        "size": 124392,
+        "sha256": "781625413740f32e97597bba4c5229e125ba1ba9127449d2410f9575ea632235"
+      },
+      "/haxx/Course/airship_courseDTex.carc": {
+        "file_id": 620,
+        "size": 43032,
+        "sha256": "7ac4a338a2008ccbec417fbeda43bfd9fffa40a769a53f809a07db25cef61b96"
+      },
+      "/haxx/Course/desert_courseD.carc": {
+        "file_id": 621,
+        "size": 142712,
+        "sha256": "bf5f34087d10f11a4a464525ec188da6826a341493583a4f40bfa445c25620fa"
+      },
+      "/haxx/Course/desert_courseDTex.carc": {
+        "file_id": 622,
+        "size": 45840,
+        "sha256": "6ec8559810d62b8a00c133c85f79390f764a897bd126dc02465d65f60abc4cd8"
+      },
+      "/haxx/Course/garden_courseD.carc": {
+        "file_id": 623,
+        "size": 106964,
+        "sha256": "5994ab5058ee2dc33ef95aa8435a5c1ea85ab75c53508f59d4f95e8552efb60e"
+      },
+      "/haxx/Course/garden_courseDTex.carc": {
+        "file_id": 624,
+        "size": 47456,
+        "sha256": "8d758eda39a848f930ccccfd3a988f4ba5e2a7c3d3ccaa68b74700cf9d4a5bf1"
+      },
+      "/haxx/Course/koopa_courseD.carc": {
+        "file_id": 625,
+        "size": 112680,
+        "sha256": "1bd23a957f044b168a3f6ad60ebf82948d59fdc694d39047f1270ac23b9cb7ea"
+      },
+      "/haxx/Course/koopa_courseDTex.carc": {
+        "file_id": 626,
+        "size": 41840,
+        "sha256": "3d5a50466ede396734671d071dcbc40f8a87dfb1fc6249f617c14587807ea917"
+      },
+      "/haxx/Course/mario_courseD.carc": {
+        "file_id": 627,
+        "size": 145520,
+        "sha256": "6581ae27d4a4b894472acf947241cead7fff527af966a93e8cf0dd24f486da35"
+      },
+      "/haxx/Course/mario_courseDTex.carc": {
+        "file_id": 628,
+        "size": 43452,
+        "sha256": "56a79b652429dc56b406fa97d5ba5b1d6e1593a8208891de2afebebdd2d3f8ff"
+      },
+      "/haxx/Course/old_donut_sfcD.carc": {
+        "file_id": 629,
+        "size": 123552,
+        "sha256": "42780336c7afa8e3d288b4bcec294fb896aa032bff246367891aa34ddd001dd1"
+      },
+      "/haxx/Course/old_donut_sfcDTex.carc": {
+        "file_id": 630,
+        "size": 28616,
+        "sha256": "ed7abd64cac5b0064fab7c6c156abd466744a38256cebb87b1824a4adcdb6820"
+      },
+      "/haxx/Course/old_kinoko_gcD.carc": {
+        "file_id": 631,
+        "size": 136492,
+        "sha256": "2b8e4f3a41a6da41ae36b85d23e7981ec54b2bfd9a0a8d76a874c749c62a02f4"
+      },
+      "/haxx/Course/old_kinoko_gcDTex.carc": {
+        "file_id": 632,
+        "size": 49336,
+        "sha256": "992877f2a9056515a6e2ffd9d9d82c4d2bdd5bdc6bcd33cc6ab95fa557763ba6"
+      },
+      "/haxx/Course/old_luigi_agbD.carc": {
+        "file_id": 633,
+        "size": 127668,
+        "sha256": "c967ca89e0939798a3734dd630d37728af743fd805af68728cf9be288d4880ae"
+      },
+      "/haxx/Course/old_luigi_agbDTex.carc": {
+        "file_id": 634,
+        "size": 21240,
+        "sha256": "ef9b4b8d42840b1c543f5e9c127dd0b13b3b1923372ed8a25d3c21166a9ba8ba"
+      },
+      "/haxx/Course/old_yoshi_gcD.carc": {
+        "file_id": 635,
+        "size": 153288,
+        "sha256": "08ac64ad7aae3099739a55259b6458378b815d2c429e28177ffd251112e401fe"
+      },
+      "/haxx/Course/old_yoshi_gcDTex.carc": {
+        "file_id": 636,
+        "size": 44452,
+        "sha256": "31be524c88b7d54295da115966d7a263b2a4723a7e300d91b20fe7179203b74a"
+      },
+      "/haxx/Course/pinball_courseD.carc": {
+        "file_id": 637,
+        "size": 127012,
+        "sha256": "b9e9a862f167c9dc3f489ed0d45f741ad1504d34f38fe99589f3d7a2836b35e2"
+      },
+      "/haxx/Course/pinball_courseDTex.carc": {
+        "file_id": 638,
+        "size": 41852,
+        "sha256": "4843fa3537aab6bfe354485fc333888684aeb4440af14318770d23b53af4ed0a"
+      },
+      "/haxx/Course/rainbow_courseD.carc": {
+        "file_id": 639,
+        "size": 158432,
+        "sha256": "26bcc96634df9a8f5378b73f491f927513843e8f9461680e77a12cb776f55ad1"
+      },
+      "/haxx/Course/rainbow_courseDTex.carc": {
+        "file_id": 640,
+        "size": 31784,
+        "sha256": "6104435259ee798b0feb9c3b1c24332e0744ebf93f76616e256cfed3ac82ec5f"
+      },
+      "/haxx/Course/ridge_courseD.carc": {
+        "file_id": 641,
+        "size": 124388,
+        "sha256": "f596b1d36e629e43f06dde8c1b328e4932ff861e4205b1d53bfe24427c8860b2"
+      },
+      "/haxx/Course/ridge_courseDTex.carc": {
+        "file_id": 642,
+        "size": 48944,
+        "sha256": "7391961b709ceaf83749e77a03be5753c48d85edef78f646f43f08f64c75b51e"
+      },
+      "/haxx/Course/snow_courseD.carc": {
+        "file_id": 643,
+        "size": 134944,
+        "sha256": "425f9eb4f685c6449efad52ccf5378f1b8b69a372244b2c9a79307669303c8b9"
+      },
+      "/haxx/Course/snow_courseDTex.carc": {
+        "file_id": 644,
+        "size": 45068,
+        "sha256": "11afcd7f6d6e27e041741df995365b46b02e0662127474aed36ff491e3be187e"
+      },
+      "/haxx/Course/stadium_courseD.carc": {
+        "file_id": 645,
+        "size": 141288,
+        "sha256": "cc90a59de9346dd72035e89e20e04595618795f14d8d56ad494dea02b3162756"
+      },
+      "/haxx/Course/stadium_courseDTex.carc": {
+        "file_id": 646,
+        "size": 44400,
+        "sha256": "75dc3d5f83ae84b192436eaa3bb6849091fb7feee2c9580a23fe498b6f45df20"
+      },
+      "/haxx/Course/town_courseD.carc": {
+        "file_id": 647,
+        "size": 121448,
+        "sha256": "8671d69ea07d499cd2f5bb43dfaabdd017b5a7ca3d45e88b0b2483ecf333a3df"
+      },
+      "/haxx/Course/town_courseDTex.carc": {
+        "file_id": 648,
+        "size": 65016,
+        "sha256": "b618b0dc0aef2891c320ff22f4517825c0c8b55bec1866ce4e5c6fdb7cd6cca3"
+      },
+      "/haxx/mb_child_ov0.bin": {
+        "file_id": 610,
+        "size": 152340,
+        "sha256": "7be02aac8e7fec0800be215e7e775e2d039989e2285ce228a1f99e152d3afea6"
+      },
+      "/haxx/mb_child_ov1.bin": {
+        "file_id": 611,
+        "size": 106844,
+        "sha256": "9534cccb47507c0ed93dfc95affddaef02a199dac99f93b1ba8132b2bf3658ab"
+      },
+      "/haxx/mb_child_ov2.bin": {
+        "file_id": 612,
+        "size": 20,
+        "sha256": "07d1d94d7d3269a1155925f01090a020e40387e8e8998fc3b4a1a3c633ca4d46"
+      },
+      "/haxx/mb_child_ov3.bin": {
+        "file_id": 613,
+        "size": 91348,
+        "sha256": "9d0f7b34abf533882a656a83f315ee39b2e4c7486e9f59e5c1b5748194e4c312"
+      },
+      "/haxx/mb_child_ovt.bin": {
+        "file_id": 614,
+        "size": 128,
+        "sha256": "9d6b434321a26e36fb570ee6752473f78a7468669c618116ec046929de1a3c7b"
+      },
+      "/haxx/mb_child_usa.bin": {
+        "file_id": 615,
+        "size": 1114304,
+        "sha256": "e2b9f05ecc190aed45938d34c1ca8366236d0fe5579076d481895243831dcbec"
+      },
+      "/haxx/station_client.srl": {
+        "file_id": 616,
+        "size": 306824,
+        "sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b"
+      },
+      "/haxx/station_demomenu.bin": {
+        "file_id": 617,
+        "size": 3980,
+        "sha256": "9decaa127485de1d7b9cfe2668b6e1847396f0d97323a70d68e142eb48b454fb"
+      },
+      "/haxx/station_rom0000d.bin": {
+        "file_id": 618,
+        "size": 1138752,
+        "sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457"
+      }
+    }
+  }
+}
