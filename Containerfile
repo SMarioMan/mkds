@@ -58,7 +58,29 @@ RUN git clone --filter=blob:none https://github.com/melonDS-emu/melonDS.git /opt
     cmake --build /opt/melonds-build --target core
 
 # -----------------------------------------------------------------------------
-# Stage 3: Final reproducible MKDS build + static test + emulator test image
+# Stage 3: Build pinned Gericom/dspatch (commit 32856c4b68c8e45d90fe135d5555a4596fbd2955)
+# -----------------------------------------------------------------------------
+FROM docker.io/library/ubuntu:24.04 AS dspatch-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG DSPATCH_COMMIT=32856c4b68c8e45d90fe135d5555a4596fbd2955
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    mono-devel \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --filter=blob:none https://github.com/Gericom/dspatch.git /opt/dspatch-src && \
+    git -C /opt/dspatch-src checkout "${DSPATCH_COMMIT}" && \
+    xbuild /p:Configuration=Release /p:AllowUnsafeBlocks=true /opt/dspatch-src/dspatch/dspatch.csproj && \
+    mkdir -p /opt/mkds-tools/lib /opt/mkds-tools/bin && \
+    cp /opt/dspatch-src/dspatch/bin/Release/dspatch.exe /opt/mkds-tools/lib/dspatch.exe && \
+    printf '#!/usr/bin/env sh\nexec mono /opt/mkds-tools/lib/dspatch.exe "$@"\n' > /opt/mkds-tools/bin/dspatch && \
+    chmod +x /opt/mkds-tools/bin/dspatch
+
+# -----------------------------------------------------------------------------
+# Stage 4: Final reproducible MKDS build + static test + emulator test image
 # -----------------------------------------------------------------------------
 FROM docker.io/library/ubuntu:24.04
 
@@ -72,9 +94,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     g++ \
     gcc \
+    gcc-arm-none-eabi \
     git \
     liburing2 \
     make \
+    mono-runtime \
     ninja-build \
     python3 \
     python3-pil \
@@ -85,17 +109,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=wibo-builder /opt/mkds-tools/bin/wibo /opt/mkds-tools/bin/wibo
 COPY --from=melonds-builder /opt/melonds-src /opt/melonds-src
 COPY --from=melonds-builder /opt/melonds-build /opt/melonds-build
+COPY --from=dspatch-builder /opt/mkds-tools/lib/dspatch.exe /opt/mkds-tools/lib/dspatch.exe
+COPY --from=dspatch-builder /opt/mkds-tools/bin/dspatch /opt/mkds-tools/bin/dspatch
 
 COPY tools/download_tool.py /tmp/download_tool.py
 RUN python3 /tmp/download_tool.py dsd "${DSD_TAG}" --path /opt/mkds-tools/bin/dsd && \
     python3 /tmp/download_tool.py mwccarm latest --path /opt/mkds-tools && \
     python3 /tmp/download_tool.py objdiff "${OBJDIFF_TAG}" --path /opt/mkds-tools/bin/objdiff-cli && \
     rm -f /tmp/download_tool.py && \
+    chmod -R a+rX /opt/mkds-tools /opt/melonds-src /opt/melonds-build && \
     /opt/mkds-tools/bin/wibo --version && \
     /opt/mkds-tools/bin/dsd --version
 
-ENV MKDS_WIBO=/opt/mkds-tools/bin/wibo \
+ENV PATH="/opt/mkds-tools/bin:${PATH}" \
+    MKDS_WIBO=/opt/mkds-tools/bin/wibo \
     MKDS_DSD=/opt/mkds-tools/bin/dsd \
+    MKDS_DSPATCH=/opt/mkds-tools/bin/dspatch \
     MKDS_MWCCARM=/opt/mkds-tools/mwccarm \
     MKDS_OBJDIFF=/opt/mkds-tools/bin/objdiff-cli \
     MELONDS_SRC=/opt/melonds-src \

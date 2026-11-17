@@ -1,5 +1,7 @@
 # Never commit game data: ROMs, BIOS dumps, extracted assets, disassembly
 *.nds
+*.srl
+*.sgn
 *.zip
 *.bin
 *.sav
