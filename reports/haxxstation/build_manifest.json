@@ -2,8 +2,8 @@
   "schema_version": 1,
   "region": "usa",
   "game_code": "AMCE-00",
-  "git_base_head": "c1680030331c78c671a091e0d008ef6ace2e426a",
-  "configured_guests_arg": 1,
+  "git_base_head": "c2fa1c22df9bb62d43b0b159de7614a8d5694da9",
+  "configured_guests_arg": 7,
   "dynamic_runtime_guest_support": "1..7",
   "bootstrap_mode_default": "haxxstation",
   "pinned_tools": {
@@ -51,34 +51,34 @@
   },
   "m2_guest_manifest": {
     "guest_nds": "/work/mkds/build/haxxstation/mkds-simple32-guest.nds",
-    "guest_nds_size": 1139200,
-    "guest_nds_sha256": "326b7fba1e7f9817256295912b44eb4515965fdec0ccb12226cf40d630fc16ce",
-    "decoded_guest_arm9_size": 1547352,
-    "decoded_guest_arm9_sha256": "b4beddba0a637876f255a55404b8160783b3cc27467448deb1718827d3a92ea5",
-    "compressed_guest_arm9_size": 952904,
-    "compressed_guest_arm9_sha256": "20980fd25107b4077dd27425a7192e7b08c0bf105c1c6a173b35ace877eca834",
+    "guest_nds_size": 1139712,
+    "guest_nds_sha256": "ca40dd9cfe66062e28a71431f99be81ceed01ce980dea52256d0a0905313c526",
+    "decoded_guest_arm9_size": 1548152,
+    "decoded_guest_arm9_sha256": "5caf4203c5b43cf2cf13efa553fa732067848fa2d9192c464958cdbb9f3cfe4d",
+    "compressed_guest_arm9_size": 953624,
+    "compressed_guest_arm9_sha256": "8d8c25588de13b09b7ffd7d9f2e1511e5e36b4ab35b29ef26464007645ca06cd",
     "arm7_size": 166308,
     "arm7_sha256": "00778bd51d96ef14bf278d6b27f6ad063ddc6c343769ca643a5a042baa3f839f",
     "autoload_hook_addr": "0x02000A58 -> 0x02001000",
-    "ovt_hmac_addr": "0x0217093c",
-    "ovt_hmac_sha1": "5a4e1ffdf090690daac5ab89829889cd276ecc22",
+    "ovt_hmac_addr": "0x02170bbc",
+    "ovt_hmac_sha1": "e8764c66b21355b554fc313c135d7a7b8de93aa0",
     "overlay_signatures_sha1": [
-      "4aa87fe7ffadef0022e5c6febde96522e287fe21",
-      "887e64100b9d1386044e64ce331c33adb4d2a5f6",
+      "0f1d23e7410654253a3e3678e6037a8c37cc5ab2",
+      "d52c296999f2df0c6bb34eafe94aa8ba0a509528",
       "c0b0fd3eef0b86148e6441b47fcd3a9fe7935bb7",
-      "b4699f111a4b81d6edd046dca46b41200c8612df"
+      "96acd164cdf4c696221e9a603244ef802fdf8d1d"
     ],
     "disassembly_proof": {
-      "GetSelectCupGridCupEnabled_addr": "0x0211a05c",
-      "GetSelectCupGridCupEnabled_snippet": "211a0a6:\t2401      \tmovs\tr4, #1\n211a0fc:\t2401      \tmovs\tr4, #1\n211a134:\t2f08      \tcmp\tr7, #8\n211a138:\t2401      \tmovs\tr4, #1\n211a15a:\t2401      \tmovs\tr4, #1",
+      "GetSelectCupGridCupEnabled_addr": "0x0211a2dc",
+      "GetSelectCupGridCupEnabled_snippet": "211a326:\t2401      \tmovs\tr4, #1\n211a37c:\t2401      \tmovs\tr4, #1\n211a3b4:\t2f08      \tcmp\tr7, #8\n211a3b8:\t2401      \tmovs\tr4, #1\n211a3da:\t2401      \tmovs\tr4, #1",
       "BuildCourseList_addr": "0x02046134",
       "BuildCourseList_snippet": "20462ec:\te3580008 \tcmp\tr8, #8\n20462fc:\te3550020 \tcmp\tr5, #32"
     },
     "station_wrap_audit": {
       "station_rom_sha1": "f18b55f3e1259c03e10d0ecb549693b42905ceb5",
       "wrapped_rom": "/work/mkds/build/haxxstation/station-mkds-guest-host.nds",
-      "wrapped_rom_size": 1756388,
-      "wrapped_rom_sha256": "0ab8a4c562c298665c73af6edf128412045b513443e976400ed86b264e782a9e",
+      "wrapped_rom_size": 1756900,
+      "wrapped_rom_sha256": "fcc5bc4ad4f9c06dd653a63097cb14180331c5fb5b2c406f1fc421eccede100b",
       "signed_stage1_srl_size": 306824,
       "signed_stage1_srl_sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b",
       "signed_stage1_sgn_size": 155,
@@ -86,9 +86,9 @@
       "signed_stage1_byte_identical": true,
       "demomenu_size": 3980,
       "demomenu_sha256": "9decaa127485de1d7b9cfe2668b6e1847396f0d97323a70d68e142eb48b454fb",
-      "rom0000d_size": 1138752,
-      "rom0000d_sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457",
-      "rom0000d_header_crc16": "0x007b",
+      "rom0000d_size": 1139264,
+      "rom0000d_sha256": "f0802cef5d7aeb01f8879771aa60e357976abc1a9a86321aafd8e84c0840ace7",
+      "rom0000d_header_crc16": "0x6217",
       "exploit_arm9_header": {
         "offset": "0x180",
         "entry": "0x02000800",
@@ -99,8 +99,8 @@
         "arm9_file_offset": "0x4000",
         "arm9_entry": "0x02000800",
         "arm9_ram": "0x02000000",
-        "arm9_size": 952904,
-        "arm7_file_offset": "0xecc00",
+        "arm9_size": 953624,
+        "arm7_file_offset": "0xece00",
         "arm7_entry": "0x02380000",
         "arm7_ram": "0x02380000",
         "arm7_size": 166308,
@@ -110,9 +110,9 @@
     }
   },
   "m6_final_host_manifest": {
-    "host_rom": "/work/mkds/build/haxxstation/mkds-simple32-haxxstation-host.nds",
+    "host_rom": "/work/mkds/build/haxxstation/mkds-simple32-haxxstation-host-repro.nds",
     "host_rom_size": 33554432,
-    "host_rom_sha256": "c8a386687b6c17ded0ff038a5ef19c3de64e558d9536bd2867a82af57a7444e3",
+    "host_rom_sha256": "60e0a6d04a1852b526440b8f224be49dc5d1ca20474a5bd9144796f668a65cf9",
     "game_code": "AMCE",
     "signed_stage1_srl_fid": 616,
     "signed_stage1_srl_sha256": "deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b",
@@ -121,16 +121,16 @@
     "station_demomenu_size": 3980,
     "station_demomenu_sha256": "9decaa127485de1d7b9cfe2668b6e1847396f0d97323a70d68e142eb48b454fb",
     "station_rom0000d_fid": 618,
-    "station_rom0000d_size": 1138752,
-    "station_rom0000d_sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457",
+    "station_rom0000d_size": 1139264,
+    "station_rom0000d_sha256": "f0802cef5d7aeb01f8879771aa60e357976abc1a9a86321aafd8e84c0840ace7",
     "original_retail_files_verified": 606,
     "d_archive_redirects_verified": 30,
     "provisional_layout_match": true,
     "exec_and_ovt": {
       "arm9_entry": 33556480,
       "arm9_ram": 33554432,
-      "arm9_size": 953040,
-      "arm9_sha256": "899de33be9c9253b137039c364b28a8b8320638006201a618cdb5ce7e741f726",
+      "arm9_size": 953764,
+      "arm9_sha256": "fa5442a39657cb1a877b2e7b9f5f916f659b102f186723159b8bb7b070333366",
       "arm7_entry": 37224448,
       "arm7_ram": 37224448,
       "arm7_size": 166308,
@@ -139,12 +139,12 @@
       "fnt_sha256": "1461791a75acb73d3a43a8befe11dc35a16dd335ab2e8bf45d4eac5249ee520d",
       "fat_entry_count": 649,
       "ovt9_size": 128,
-      "ovt9_sha256": "f74f8389eff4f7be1937730ee18d767a1e7d81c1e661f3e27d66abbc9d01b71c",
+      "ovt9_sha256": "1e6269c184cd5751cfd8d963355d5ddc9be8654da938ea579d0c22520df86abd",
       "ov0_to_3_sha256": [
-        "feafec1a8e4bb3dd514c1eaa274f7e12a2a9046644e169e378b19e6ceb56d84d",
-        "b5fdad81f296487dcb3dbe4ce1573006d362f6592a2e0c6b40ed2097655236cc",
+        "2870e9afe44725cd82218e74d5bfe27e826076992b5ee98e93770d8abfcd720d",
+        "8baa24ed3ca65bd5b1745094a845ba843d483be7c88579bc7620c47b4cdac1ae",
         "07d1d94d7d3269a1155925f01090a020e40387e8e8998fc3b4a1a3c633ca4d46",
-        "782142196f8a8b4b8471226f25d911d934f7734677569d717c58cc9a2b42f6fa"
+        "ec4de903f2682d78e665bd6b0c2a022f110431aa3fe3dd72984b57f85447c4db"
       ]
     },
     "added_file_ids": {
@@ -340,8 +340,8 @@
       },
       "/haxx/station_rom0000d.bin": {
         "file_id": 618,
-        "size": 1138752,
-        "sha256": "dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457"
+        "size": 1139264,
+        "sha256": "f0802cef5d7aeb01f8879771aa60e357976abc1a9a86321aafd8e84c0840ace7"
       }
     }
   }

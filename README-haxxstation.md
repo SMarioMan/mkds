@@ -1,6 +1,6 @@
 # Mario Kart DS — Simple Mode 32-Track HaxxStation Build & Operations Guide
 
-Unlock all **8 cups / 32 standard retail race tracks** in *Mario Kart DS* USA (`AMCE-00`) **Simple mode** (single-cartridge Download Play) with **completely unmodified Nintendo DS / DS Lite guest consoles**.
+Unlock all **8 cups / 32 standard retail race tracks** in *Mario Kart DS* USA (`AMCE-00`) **Simple mode** (single-cartridge Download Play) for **2 to 8 players (`1` Host + `1..7` completely unmodified Nintendo DS / DS Lite guest consoles)**.
 
 No Nintendo ROMs, signed binaries, BIOS/firmware dumps, or commercial assets are stored in this repository. All ROMs and intermediates are generated locally inside a reproducible Podman container from two user-supplied retail dumps.
 
@@ -12,9 +12,9 @@ Retail *Mario Kart DS* Simple mode transmits a static RSA-signed guest executabl
 
 This branch implements an **embedded HaxxStation two-stage bootstrap** inside a single playable *Mario Kart DS* Host ROM:
 
-1. **Stage 1 (Firmware RSA-1024 Authenticated):** When the host opens a Simple-mode group (`Simple -> Create Group`), it advertises Station `GGID = 0x00400120` on MKDS's chosen `TGID` and RF channel, and serves the **byte-for-byte unmodified** Nintendo-signed *DS Download Station — Volume 1* client (`mb/ds_demo_client.srl`, `306,824` B, `SHA-256: deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b`). Stock DS/DS Lite firmware validates its original RSA-1024 signature and boots the Station client.
-2. **Stage 2 (Unsigned Modified MKDS Guest via `dspatch`):** Inside `WLMenuScene`, `src/Main/HaxxStation.inc.c` runs the Station application server (`WM` ports `13`, `14`, `15` + port `1` Station keepalive) using a bounded `8 x 16 KiB` LRU NitroFS page cache, serving `demomenu` (`3,980` B) and `rom0000d` (`1,138,752` B — an executable-only modified MKDS guest wrapped by `Gericom/dspatch` commit `32856c4b68c8e45d90fe135d5555a4596fbd2955`). A **party-wide execution barrier** holds the `0xFFFF` launch marker until every joined guest (`1..7`) finishes downloading `rom0000d`.
-3. **Native MKDS Wireless Rejoin & Asset Streaming:** On launch, a 36-byte guest `AutoloadCallback` stub (`0x02001000`) restores `GGID = 0x00000025` at `0x027FFC4E` while preserving `*(u16*)0x027FFC40 == 2` (`bootType = MULTIBOOT`), parent MAC, RF channel, and `TGID`. Both host and guest(s) transition into MKDS's native `(TGID + 7) & 0x7FFF` wireless session, seed identical PRNG state (`mUnk_1ee8`), verify `ov000..ov003` and `ARM9_OVT` via NitroSDK `HMAC-SHA1`, mount the wireless `RomArchiveBlock` (`WM` port `4`) with 15 generated reduced `D` course archives (`30` `.carc` files under `/haxx/Course/`), and run all 32 tracks across Choose, In-Order (Sequential), and Random VS modes.
+1. **Stage 1 (Firmware RSA-1024 Authenticated):** When the host opens a Simple-mode group (`Simple -> Create Group`), it advertises Station `GGID = 0x00400120` on MKDS's chosen `TGID` and RF channel (`{1, 7, 13}`), and serves the **byte-for-byte unmodified** Nintendo-signed *DS Download Station — Volume 1* client (`mb/ds_demo_client.srl`, `306,824` B, `SHA-256: deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b`). Stock DS/DS Lite firmware validates its original RSA-1024 signature and boots the Station client on all `1..7` guests.
+2. **Stage 2 (Unsigned Modified MKDS Guest via `dspatch` + 7-Client Cohort Multicast):** Inside `WLMenuScene`, `src/Main/HaxxStation.inc.c` runs the Station application server (`WM` ports `13`, `14`, `15` + port `1` Station keepalive) using a bounded, non-evicting `16 x 8 KiB` (`128 KiB`) LRU NitroFS page cache, serving `demomenu` (`3,980` B) and `rom0000d` (`1,139,264` B — an executable-only modified MKDS guest wrapped by `Gericom/dspatch` commit `32856c4b68c8e45d90fe135d5555a4596fbd2955`). Port `15` `rom0000d` chunks are broadcast via **minimum-offset cohort multicast** (`WMi_GetStatusAddress()->mMpReadyBitmap`), and a **party-wide execution barrier** holds the `0xFFFF` launch marker until every joined guest (`1..7`, `AID 1..7`) finishes downloading `rom0000d`.
+3. **Native MKDS Wireless Rejoin & Asset Streaming:** On launch, a 36-byte guest `AutoloadCallback` stub (`0x02001000`) restores `GGID = 0x00000025` at `0x027FFC4E` while preserving `*(u16*)0x027FFC40 == 2` (`bootType = MULTIBOOT`), parent MAC, RF channel, and `TGID`. Host and all `1..7` guests transition into MKDS's native `(TGID + 7) & 0x7FFF` wireless session, seed identical PRNG state (`mUnk_1ee8`), verify `ov000..ov003` and `ARM9_OVT` via NitroSDK `HMAC-SHA1`, mount the wireless `RomArchiveBlock` (`WM` port `4`) with 15 generated reduced `D` course archives (`30` `.carc` files under `/haxx/Course/`), and run all 32 tracks across Choose, In-Order (Sequential), and Random VS modes.
 
 ---
 
@@ -55,15 +55,15 @@ podman run --rm \
     --mkds-rom "/work/mkds/extract/baserom_mkds_usa.nds" \
     --station-rom "/work/DS Download Station - Volume 1 (USA) (Demo) (Wi-Fi Kiosk).nds" \
     --region usa \
-    --guests 1 \
+    --guests 7 \
     --out build/haxxstation/mkds-simple32-haxxstation-host.nds
 ```
 
 **Deterministic Output (`build/haxxstation/mkds-simple32-haxxstation-host.nds`):**
 - Size: `33,554,432` bytes (`32 MiB`)
-- `SHA-256`: `c8a386687b6c17ded0ff038a5ef19c3de64e558d9536bd2867a82af57a7444e3`
+- `SHA-256`: `60e0a6d04a1852b526440b8f224be49dc5d1ca20474a5bd9144796f668a65cf9`
 - Embedded untouched Stage-1 `station_client.srl` `SHA-256`: `deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b`
-- Embedded Stage-2 `station_rom0000d.bin` `SHA-256`: `dccb2aa591abf6840d5decba1b8dab3e39aaec986d9b86c341fbf65d0efaa457`
+- Embedded Stage-2 `station_rom0000d.bin` `SHA-256`: `f0802cef5d7aeb01f8879771aa60e357976abc1a9a86321aafd8e84c0840ace7`
 - Machine-readable audit manifest: `reports/haxxstation/build_manifest.json`
 
 *(Note: `--guests 1..7` records target party metadata in `build_manifest.json`; the generated Host ROM dynamically detects `1..7` connected Download Play guests at runtime from the Stage-1 boot mask.)*
@@ -78,7 +78,7 @@ podman run --rm \
 
 ## 4. Running the Automated Validation Suite
 
-Inside the Podman container, build `dlp_harness` (`melonDS 906e9ebb` with unmodified DS firmware RSA-1024 boot) and run the full 32-track + multi-guest + regression suite:
+Inside the Podman container, build `dlp_harness` (`melonDS 906e9ebb` with unmodified DS firmware RSA-1024 boot) and run the full 32-track + `1..7`-guest (up to 8-player) + regression suite (`32/32 courses PASS, 13/13 regressions PASS`):
 
 ```bash
 podman run --rm \
@@ -95,8 +95,8 @@ podman run --rm \
 
 Generated validation reports:
 - `reports/haxxstation/course_matrix.csv` — All 32 retail tracks cold-booted through Stage-1 RSA, Stage-2 launch, native rejoin, 3-lap race, results, and Next-Race transition.
-- `reports/haxxstation/phase_trace.jsonl` — Structured wireless state-machine trace across every bootstrap boundary.
-- `reports/haxxstation/stage_results.md` — Gate-by-gate (`M0..M7`) results, root causes resolved, and evidence tiers.
+- `reports/haxxstation/phase_trace.jsonl` — Structured wireless state-machine trace across every bootstrap boundary (including 2-guest and 7-guest / 8-player runs).
+- `reports/haxxstation/stage_results.md` — Gate-by-gate (`M0..M7`) results, 8-player scaling root causes resolved, and evidence tiers.
 - `reports/haxxstation/memory_map.md` — Stage-1 / Stage-2 / MKDS runtime MainRAM, overlay, ITCM, and DTCM map.
 - `reports/haxxstation/hardware_results.md` — Physical DS / DS Lite acceptance checklist (`NOT TESTED` in container environment).
 
@@ -110,13 +110,13 @@ Generated validation reports:
    - Power on `1..7` unmodified DS / DS Lite consoles (no cartridge required, stock firmware).
    - Tap **DS Download Play** on the DS system menu.
    - Select **Mario Kart DS** (`Simple Mode (32 Tracks)`) and choose **Yes** to download.
-4. **Start Stage-1 Transfer (Host):** Once all desired guests appear in the Host's member list, press **A** (or **START**) on the Host to cut off entry.
+4. **Start Stage-1 Transfer (Host):** Once all desired guests (`1..7`) appear in the Host's member list, press **A** (or **START**) on the Host to cut off entry.
 5. **Stage-1 Download Station Menu Tap (Guests — 1 Extra Confirmation Step):**
    - Each Guest DS validates Nintendo's RSA signature and boots into the **DS Download Station** screen showing **Mario Kart DS — Simple Mode (32 Tracks)** while the Host displays `PLEASE WAIT...`.
-   - On **each Guest DS**, press **A** (or tap the entry) and confirm **Yes** to download the Stage-2 game client (`~1.13 MiB`).
-   - **No synchronized button timing is required:** guests that tap early download to `100%` and wait automatically at the Host's `0xFFFF` execution barrier until the last guest reaches `100%`.
+   - On **each Guest DS**, press **A** (or tap the entry) and confirm **Yes** to download the Stage-2 game client (`~1.14 MiB`).
+   - **No synchronized button timing is required:** late-tapping guests catch up into the Host's Port `15` multicast cohort automatically, and guests that reach `100%` first wait at the Host's `0xFFFF` execution barrier until the last guest finishes downloading.
 6. **Automatic Native MKDS Handoff & Racing:**
-   - Once all joined guests reach `100%`, every Guest DS boots directly into *Mario Kart DS* and automatically rejoins the Host.
+   - Once all joined guests reach `100%`, every Guest DS boots directly into *Mario Kart DS* and automatically rejoins the Host (`participantMask` up to `0xFF` for all 8 players).
    - Configure VS rules (`Choose`, `In Order`, or `Random`) on the Host: all **8 cups and 32 standard tracks** are unlocked and selectable on both Host and Guest consoles, and consecutive races proceed directly via **Next Course** without re-downloading.
 
 ---
@@ -125,7 +125,7 @@ Generated validation reports:
 
 | Symptom / Stage | Cause & Check |
 | --- | --- |
-| Guest sits on `DS Download Station` screen while Host says `PLEASE WAIT...` | Expected Stage-1 menu step: press **A -> Left (Yes) -> A** on every Guest DS to start the Stage-2 download. In multi-guest play, early guests wait at `100%` until all guests finish downloading. |
+| Guest sits on `DS Download Station` screen while Host says `PLEASE WAIT...` | Expected Stage-1 menu step: press **A -> Left (Yes) -> A** on every Guest DS to start the Stage-2 download. In multi-guest (`2..7` guests) play, early guests wait at `100%` until all joined guests finish downloading. |
 | Guest rejects Stage-1 download on DS Firmware screen | Verify `signed_stage1_srl_sha256` in `reports/haxxstation/build_manifest.json` equals `deaec313106e34d8290b4c9c6e3405b8bb2eaec1db6c2cad38ee2771aef1ca2b`, and disable any flashcart kernel "Download Play cheat/patch" feature that mutates MB headers. |
 | Build fails with `SHA-1 mismatch` | Ensure the MKDS USA ROM is the untrimmed `33,554,432`-byte `AMCE-00` dump (`691e00d9...`) and the Station ROM is the unmodified `16,777,216`-byte Volume 1 USA dump (`f18b55f3...`). |
-| Physical hardware status | Emulator validation (`melonDS 906e9ebb` with real BIOS/firmware RSA) is complete; physical flashcart + stock DS/DS Lite RF testing remains marked **`NOT TESTED`** in `reports/haxxstation/hardware_results.md` until executed on real consoles. |
+| Physical hardware status | Emulator validation (`melonDS 906e9ebb` with real BIOS/firmware RSA across `32/32` tracks and `1..7` guests / up to 8 players) is complete; physical flashcart + stock DS/DS Lite RF testing remains marked **`NOT TESTED`** in `reports/haxxstation/hardware_results.md` until executed on real consoles. |

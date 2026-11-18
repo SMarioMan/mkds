@@ -139,6 +139,8 @@ void HaxxStation_OnStage1ParentInit(void) {
     gHaxxStationHost.payloadSize = 0;
     gHaxxStationHost.txBusy = 0;
     gHaxxStationHost.txAid = 0;
+    gHaxxStationHost.txMask = 0;
+    gHaxxStationHost.txPad = 0;
     gHaxxStationHost.txPhase = 0;
     gHaxxStationHost.txOffset = 0;
     gHaxxStationHost.txBytes = 0;
@@ -160,6 +162,7 @@ void HaxxStation_OnStage1ParentInit(void) {
         gHaxxStationHost.peers[i].generation = 1;
         gHaxxStationHost.peers[i].cooldown = 0;
         gHaxxStationHost.peers[i].reserved = 0;
+        gHaxxStationHost.txGenByAid[i] = 0;
     }
 }
 
@@ -317,9 +320,11 @@ static void HaxxStation_RefillCacheForPeers(void) {
              peer->phase == HS_PEER_PAYLOAD_START || peer->phase == HS_PEER_PAYLOAD_BODY) &&
             peer->offset < gHaxxStationHost.payloadSize) {
             u32 page0 = peer->offset / HAXXSTATION_CACHE_PAGE_SIZE;
+            u32 pageOff = peer->offset % HAXXSTATION_CACHE_PAGE_SIZE;
             HaxxStation_LoadCachePage(page0);
-            if ((page0 + 1) * HAXXSTATION_CACHE_PAGE_SIZE < gHaxxStationHost.payloadSize) {
-                HaxxStation_LoadCachePage(page0 + 1);
+            if (pageOff + 126u > HAXXSTATION_CACHE_PAGE_SIZE &&
+                (page0 + 1u) * HAXXSTATION_CACHE_PAGE_SIZE < gHaxxStationHost.payloadSize) {
+                HaxxStation_LoadCachePage(page0 + 1u);
             }
         }
     }
@@ -368,19 +373,45 @@ static BOOL HaxxStation_CanExecuteStage2(void) {
     return TRUE;
 }
 
+static u16 HaxxStation_GetReadyAidsMask(void) {
+    u16 mask;
+    Unk02142988 *status;
+    if (gWirelessWork == NULL) {
+        return 0;
+    }
+    mask = (u16) (gWirelessWork->mConnectedAids & 0xfffeu);
+    status = WMi_GetStatusAddress();
+    if (status != NULL) {
+        DC_InvalidateRange(&status->mMpReadyBitmap, 2);
+        mask &= status->mMpReadyBitmap;
+    }
+    return mask;
+}
+
 static void HaxxStation_PortSentCb(Unk021425e8 *cb) {
     u32 savedIrq = OS_DisableInterrupts();
     u16 err = cb != NULL ? cb->mResultCode : 1;
-    u16 sentBitmap = cb != NULL ? cb->mUnk_08_2 : 0;
-    u32 aid = gHaxxStationHost.txAid;
+    /* In NitroSDK ARM7 WM (0x81 / WM_APIID_SET_MP_DATA), sentBitmap is at +0x10 (cb->mUnk_10); +0x0a is port! */
+    u16 sentBitmap = cb != NULL ? cb->mUnk_10 : 0;
+    u16 txMask = gHaxxStationHost.txMask;
+    u16 deliveredMask = (err == 0 || err == 15) ? (u16) (sentBitmap & txMask) : 0;
+    u32 aid;
 
     gHaxxStationHost.txBusy = 0;
+    gHaxxStationHost.txMask = 0;
     gHaxxStationHost.lastSendStatus = (s32) err;
 
-    if (err == 0 && aid >= 1 && aid <= 15 && (sentBitmap == 0 || (sentBitmap & (1u << aid)) != 0)) {
-        HaxxStationPeer *peer = &gHaxxStationHost.peers[aid];
-        if (peer->associated != 0 && peer->generation == gHaxxStationHost.txGen &&
-            peer->phase == gHaxxStationHost.txPhase) {
+    if (deliveredMask != 0) {
+        for (aid = 1; aid <= 15; aid++) {
+            HaxxStationPeer *peer;
+            if ((deliveredMask & (1u << aid)) == 0) {
+                continue;
+            }
+            peer = &gHaxxStationHost.peers[aid];
+            if (peer->associated == 0 || peer->generation != gHaxxStationHost.txGenByAid[aid] ||
+                peer->phase != gHaxxStationHost.txPhase) {
+                continue;
+            }
             switch (peer->phase) {
                 case HS_PEER_MENU_LEN_SEND:
                     peer->phase = HS_PEER_MENU_LEN_WAIT;
@@ -493,6 +524,15 @@ static void HaxxStation_Pump(void) {
     u32 savedIrq = OS_DisableInterrupts();
     u32 attempt;
     BOOL canExec;
+    u16 readyMask;
+    u32 selectedAid = 0;
+    u16 sendMask = 0;
+    u32 port = 0;
+    u32 sendLen = 0;
+    u32 bodyBytes = 0;
+    u32 reqOffset = 0;
+    u32 selectedPhase = 0;
+    s32 wmErr;
 
     if ((gHaxxStationHost.phase != HS_PHASE_STATION_APP_SERVE &&
          gHaxxStationHost.phase != HS_PHASE_STATION_EXECUTE_BARRIER) ||
@@ -502,22 +542,33 @@ static void HaxxStation_Pump(void) {
         return;
     }
 
+    readyMask = HaxxStation_GetReadyAidsMask();
+    if (readyMask == 0) {
+        OS_RestoreInterrupts(savedIrq);
+        return;
+    }
+
+    /* Promote any completed payload peers before evaluating the party-wide barrier */
+    for (attempt = 1; attempt <= 15; attempt++) {
+        HaxxStationPeer *p = &gHaxxStationHost.peers[attempt];
+        if (p->associated != 0 && p->phase == HS_PEER_PAYLOAD_BODY && p->offset >= gHaxxStationHost.payloadSize) {
+            p->phase = HS_PEER_BODY_COMPLETE;
+            gHaxxStationHost.bodyDoneMask |= (u16) (1u << attempt);
+        }
+    }
+
     canExec = HaxxStation_CanExecuteStage2();
     if (canExec) {
         gHaxxStationHost.phase = HS_PHASE_STATION_EXECUTE_BARRIER;
     }
 
+    /* Pass 1: Prioritize tiny control & barrier phases so staggered joiners never wait behind bulk chunks */
     for (attempt = 0; attempt < 15; attempt++) {
         u32 aid = gHaxxStationHost.nextAid;
         HaxxStationPeer *peer;
-        u32 port = 0;
-        u32 sendLen = 0;
-        u32 bodyBytes = 0;
-        u32 reqOffset = 0;
-        s32 wmErr;
 
         gHaxxStationHost.nextAid = (aid >= 15) ? 1 : (aid + 1);
-        if ((gWirelessWork->mConnectedAids & (1u << aid)) == 0) {
+        if ((readyMask & (1u << aid)) == 0) {
             continue;
         }
         peer = &gHaxxStationHost.peers[aid];
@@ -529,10 +580,12 @@ static void HaxxStation_Pump(void) {
             *(u32 *) gHaxxStationHost.txBuf = gHaxxStationHost.menuSize;
             port = 13;
             sendLen = 4;
+            sendMask = (u16) (1u << aid);
         } else if (peer->phase == HS_PEER_PAYLOAD_LEN_SEND) {
             *(u32 *) gHaxxStationHost.txBuf = gHaxxStationHost.payloadSize;
             port = 13;
             sendLen = 4;
+            sendMask = (u16) (1u << aid);
         } else if (peer->phase == HS_PEER_PAYLOAD_START) {
             u32 w;
             gHaxxStationHost.txBuf[0] = 0xfffeu;
@@ -541,6 +594,7 @@ static void HaxxStation_Pump(void) {
             }
             port = 15;
             sendLen = 32;
+            sendMask = (u16) (1u << aid);
         } else if (peer->phase == HS_PEER_MENU_BODY) {
             port = 14;
             reqOffset = peer->offset;
@@ -554,49 +608,97 @@ static void HaxxStation_Pump(void) {
                 MI_CpuCopy8(gHaxxStationHost.menuBuf + peer->offset, (u8 *) (gHaxxStationHost.txBuf + 1), bodyBytes);
                 sendLen = 2 + bodyBytes;
             }
-        } else if (peer->phase == HS_PEER_PAYLOAD_BODY) {
-            u32 rem;
-            if (peer->offset >= gHaxxStationHost.payloadSize) {
-                peer->phase = HS_PEER_BODY_COMPLETE;
-                gHaxxStationHost.bodyDoneMask |= (u16) (1u << aid);
-                continue;
-            }
-            rem = gHaxxStationHost.payloadSize - peer->offset;
-            bodyBytes = rem < 126u ? rem : 126u;
-            if (!HaxxStation_CopyFromCache(peer->offset, (u8 *) (gHaxxStationHost.txBuf + 1), bodyBytes)) {
-                continue;
-            }
-            gHaxxStationHost.txBuf[0] = peer->chunk;
-            port = 15;
-            reqOffset = peer->offset;
-            sendLen = 2 + bodyBytes;
-        } else if (peer->phase == HS_PEER_BODY_COMPLETE) {
-            if (!canExec) {
-                continue;
-            }
+            sendMask = (u16) (1u << aid);
+        } else if (peer->phase == HS_PEER_BODY_COMPLETE && canExec) {
+            u32 other;
             gHaxxStationHost.txBuf[0] = 0xffffu;
             port = 15;
             reqOffset = 0xffffffffu;
             sendLen = 2;
+            sendMask = 0;
+            for (other = 1; other <= 15; other++) {
+                HaxxStationPeer *op = &gHaxxStationHost.peers[other];
+                if ((readyMask & (1u << other)) != 0 && op->associated != 0 && op->cooldown == 0 &&
+                    op->phase == HS_PEER_BODY_COMPLETE) {
+                    sendMask |= (u16) (1u << other);
+                }
+            }
         } else {
             continue;
         }
 
+        selectedAid = aid;
+        selectedPhase = peer->phase;
+        break;
+    }
+
+    /* Pass 2: Minimum-offset catch-up + cohort multicast for bulk Stage-2 payload (Port 15) */
+    if (sendMask == 0) {
+        u32 bestAid = 0;
+        u32 bestOffset = 0xffffffffu;
+        u32 scanAid = gHaxxStationHost.nextAid;
+
+        for (attempt = 0; attempt < 15; attempt++) {
+            u32 aid = scanAid;
+            HaxxStationPeer *peer = &gHaxxStationHost.peers[aid];
+            scanAid = (aid >= 15) ? 1 : (aid + 1);
+            if ((readyMask & (1u << aid)) == 0 || peer->associated == 0 || peer->cooldown != 0 ||
+                peer->phase != HS_PEER_PAYLOAD_BODY) {
+                continue;
+            }
+            if (peer->offset < bestOffset) {
+                bestOffset = peer->offset;
+                bestAid = aid;
+            }
+        }
+
+        if (bestAid != 0) {
+            HaxxStationPeer *bestPeer = &gHaxxStationHost.peers[bestAid];
+            u32 rem = gHaxxStationHost.payloadSize - bestPeer->offset;
+            bodyBytes = rem < 126u ? rem : 126u;
+            if (HaxxStation_CopyFromCache(bestPeer->offset, (u8 *) (gHaxxStationHost.txBuf + 1), bodyBytes)) {
+                u32 other;
+                gHaxxStationHost.txBuf[0] = bestPeer->chunk;
+                port = 15;
+                reqOffset = bestPeer->offset;
+                sendLen = 2 + bodyBytes;
+                selectedAid = bestAid;
+                selectedPhase = HS_PEER_PAYLOAD_BODY;
+                gHaxxStationHost.nextAid = (bestAid >= 15) ? 1 : (bestAid + 1);
+                for (other = 1; other <= 15; other++) {
+                    HaxxStationPeer *op = &gHaxxStationHost.peers[other];
+                    if ((readyMask & (1u << other)) != 0 && op->associated != 0 && op->cooldown == 0 &&
+                        op->phase == HS_PEER_PAYLOAD_BODY && op->offset == bestPeer->offset &&
+                        op->chunk == bestPeer->chunk) {
+                        sendMask |= (u16) (1u << other);
+                    }
+                }
+            }
+        }
+    }
+
+    if (sendMask != 0 && selectedAid != 0) {
+        u32 a;
         gHaxxStationHost.txBusy = 1;
-        gHaxxStationHost.txAid = aid;
-        gHaxxStationHost.txPhase = peer->phase;
+        gHaxxStationHost.txAid = selectedAid;
+        gHaxxStationHost.txMask = sendMask;
+        gHaxxStationHost.txPhase = selectedPhase;
         gHaxxStationHost.txOffset = reqOffset;
         gHaxxStationHost.txBytes = bodyBytes;
-        gHaxxStationHost.txGen = peer->generation;
+        gHaxxStationHost.txGen = gHaxxStationHost.peers[selectedAid].generation;
+        for (a = 1; a <= 15; a++) {
+            if ((sendMask & (1u << a)) != 0) {
+                gHaxxStationHost.txGenByAid[a] = gHaxxStationHost.peers[a].generation;
+            }
+        }
 
         wmErr = WM_SetMPDataToPortEx((UnkFunc *) HaxxStation_PortSentCb, NULL, gHaxxStationHost.txBuf, (s32) sendLen,
-                                     (u16) (1u << aid), (u16) port, 0);
+                                     sendMask, (u16) port, 0);
         if (wmErr != 2) {
             gHaxxStationHost.txBusy = 0;
+            gHaxxStationHost.txMask = 0;
             gHaxxStationHost.lastSendStatus = wmErr;
         }
-        OS_RestoreInterrupts(savedIrq);
-        return;
     }
 
     OS_RestoreInterrupts(savedIrq);
@@ -777,13 +879,18 @@ BOOL HaxxStation_StepBootstrap(void) {
 
     /* Step 4: Retire Station callbacks & buffers, restore MKDS identity & roster, hand off to func_0204e090() */
     if (gHaxxStationHost.phase == HS_PHASE_STATION_SHUTDOWN) {
+        u32 execCount;
         if (gHaxxStationHost.txBusy != 0) {
             return FALSE;
         }
         HaxxStation_RestoreNativePortsAndIdentity();
         data_0217aa00->mUnk_1690 = (u16) gHaxxStationHost.savedTgid;
         data_0217aa00->mUnk_0088 = (s8) gHaxxStationHost.savedChannel;
-        data_0217aa00->mUnk_1695 = gHaxxStationHost.executedMask;
+        execCount = HaxxStation_Popcount16(gHaxxStationHost.executedMask);
+        if (execCount > 7u) {
+            execCount = 7u;
+        }
+        data_0217aa00->mUnk_1695 = (u8) (((1u << (execCount + 1u)) - 2u) & 0xfeu);
         gHaxxStationHost.phase = HS_PHASE_IDLE;
         return TRUE;
     }
@@ -843,6 +950,7 @@ BOOL HaxxStation_OnMbParentEvent(s32 eventCode, Unk021425e8 *eventData) {
                     peer->chunk = 0;
                     peer->cooldown = 0;
                     gHaxxStationHost.lastGeneration = peer->generation;
+                    gHaxxStationHost.txMask &= ~(u16) (1u << aid);
                     gHaxxStationHost.stationAppMask &= ~(u16) (1u << aid);
                     gHaxxStationHost.bodyDoneMask &= ~(u16) (1u << aid);
                 }
@@ -853,6 +961,7 @@ BOOL HaxxStation_OnMbParentEvent(s32 eventCode, Unk021425e8 *eventData) {
                 HaxxStationPeer *peer = &gHaxxStationHost.peers[aid];
                 peer->generation++;
                 peer->associated = 0;
+                gHaxxStationHost.txMask &= ~(u16) (1u << aid);
                 if (peer->phase == HS_PEER_EXECUTED) {
                     gHaxxStationHost.executedDisconnectedMask |= (u16) (1u << aid);
                 } else {

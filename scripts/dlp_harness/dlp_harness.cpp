@@ -47,6 +47,8 @@ extern void Harness_GetMPStats(u64& cmdSent, u64& hostRecv, u64& replySent, u64&
 extern void Harness_SetStage2Active(bool active);
 extern void Harness_NotifyStop();
 extern void Harness_SetPumpGuestsCallback(std::function<bool()> cb);
+extern bool Harness_HasGuestReplied(int inst);
+extern u16 Harness_GetCurrentAidMask();
 extern void Harness_CaptureFrameStarts();
 extern void Harness_NotifyFrameBegin(int inst);
 extern void Harness_NotifyFrameEnd(int inst);
@@ -363,8 +365,10 @@ template <typename ConsoleVec>
 static void SaveCompositeScreenshot(const std::string& path, const ConsoleVec& consoles)
 {
     int n = static_cast<int>(consoles.size());
-    int width = 256 * n;
-    int height = 384;
+    int cols = (n > 4) ? 4 : std::max(1, n);
+    int rows = (n + cols - 1) / cols;
+    int width = 256 * cols;
+    int height = 384 * rows;
     std::vector<u8> rgba(width * height * 4, 255);
     for (int c = 0; c < n; ++c)
     {
@@ -372,6 +376,8 @@ static void SaveCompositeScreenshot(const std::string& path, const ConsoleVec& c
         void* bottom = nullptr;
         if (!consoles[c]->GPU.GetFramebuffers(&top, &bottom) || !top || !bottom)
             continue;
+        int col = c % cols;
+        int row = c / cols;
         const u32* screens[2] = {static_cast<const u32*>(top), static_cast<const u32*>(bottom)};
         for (int s = 0; s < 2; ++s)
         {
@@ -380,8 +386,8 @@ static void SaveCompositeScreenshot(const std::string& path, const ConsoleVec& c
                 for (int x = 0; x < 256; ++x)
                 {
                     u32 px = screens[s][y * 256 + x];
-                    int dstX = c * 256 + x;
-                    int dstY = s * 192 + y;
+                    int dstX = col * 256 + x;
+                    int dstY = row * 384 + s * 192 + y;
                     std::size_t idx = (dstY * width + dstX) * 4;
                     rgba[idx + 0] = u8((px >> 16) & 0xFF); // R
                     rgba[idx + 1] = u8((px >> 8) & 0xFF);  // G
@@ -424,6 +430,8 @@ struct MkdsSymbols
     u32 gRomArchiveTransfer     = 0x02175ea0;
     u32 OSi_ExContext           = 0x021701c8;
     u32 gCupCourseIdTable       = 0x02154168;
+    u32 gCurrentHeapCall        = 0x02174e50;
+    u32 gExpHeap                = 0x021da288;
     u32 gSelectBattleStage      = 0x00000000;
     u32 gHaxxStationHost        = 0x00000000;
 
@@ -459,6 +467,8 @@ struct MkdsSymbols
             {"gRomArchiveTransfer", &gRomArchiveTransfer},
             {"OSi_ExContext", &OSi_ExContext},
             {"gCupCourseIdTable", &gCupCourseIdTable},
+            {"gCurrentHeapCall", &gCurrentHeapCall},
+            {"gExpHeap", &gExpHeap},
             {"gHaxxStationHost", &gHaxxStationHost},
         };
         std::string line;
@@ -519,6 +529,21 @@ static inline u32 RamRead32(const melonDS::NDS& nds, u32 addr)
     u32 v;
     std::memcpy(&v, &nds.MainRAM[addr & nds.MainRAMMask], 4);
     return v;
+}
+
+static inline u32 Arm9MemRead32(const melonDS::NDS& nds, u32 addr)
+{
+    if (addr >= 0x027e0000u && addr <= 0x027e3ffcu)
+    {
+        u32 v;
+        std::memcpy(&v, &nds.ARM9.DTCM[addr - 0x027e0000u], 4);
+        return v;
+    }
+    if (IsValidMainRamPtr(addr))
+    {
+        return RamRead32(nds, addr);
+    }
+    return 0;
 }
 
 static inline s32 RamReadS32(const melonDS::NDS& nds, u32 addr)
@@ -673,8 +698,8 @@ struct KartAutopilot
                 return PressKeys(KEY_A);
             }
 
-            // 2. Re-acquire ONLY on cannon landing or Lakitu respawn (dSeg3D > 1350), strictly constrained to forward route / checkpoint!
-            if (dSeg3D > 1350.0)
+            // 2. Re-acquire on cannon landing, Lakitu respawn, or stalled link advance, strictly constrained to forward route / checkpoint!
+            if (dSeg3D > 1100.0 || framesSinceLinkAdvance > 180 || (kartState != 0 && dSeg3D > 380.0))
             {
                 u32 bestLink = 0;
                 double bestScore = 1e18;
@@ -974,6 +999,8 @@ struct Config
     std::string saveFilePath;
     std::string saveLobbyPrefix;
     std::string loadLobbyPrefix;
+    std::string saveStage2Prefix;
+    std::string loadStage2Prefix;
     std::string outDir = "out";
     std::string traceJsonlPath;
     std::string mode = "simple-vs"; // simple-vs, simple-battle, normal-vs, single-gp, single-tt, station-probe, station-mkds-guest
@@ -1032,6 +1059,8 @@ int main(int argc, char** argv)
         else if (arg == "--save-file") cfg.saveFilePath = nextStr();
         else if (arg == "--save-lobby-state") cfg.saveLobbyPrefix = nextStr();
         else if (arg == "--load-lobby-state") cfg.loadLobbyPrefix = nextStr();
+        else if (arg == "--save-stage2-state") cfg.saveStage2Prefix = nextStr();
+        else if (arg == "--load-stage2-state") cfg.loadStage2Prefix = nextStr();
         else if (arg == "--out-dir") cfg.outDir = nextStr();
         else if (arg == "--trace-jsonl") cfg.traceJsonlPath = nextStr();
         else if (arg == "--mode") cfg.mode = nextStr();
@@ -1169,14 +1198,17 @@ int main(int argc, char** argv)
     for (int c = 0; c < numConsoles; ++c) rawPtrs[c] = consoles[c].get();
     Harness_RegisterConsoles(numConsoles, rawPtrs.data());
 
-    // Optional savestate restore for fast branching from Simple-mode lobby
+    // Optional savestate restore for fast branching from Simple-mode lobby or Stage-2 boot
     bool loadedFromLobbyState = false;
-    if (!cfg.loadLobbyPrefix.empty())
+    bool loadedFromStage2State = false;
+    const std::string& restorePrefix = !cfg.loadLobbyPrefix.empty() ? cfg.loadLobbyPrefix : cfg.loadStage2Prefix;
+    if (!restorePrefix.empty())
     {
-        loadedFromLobbyState = true;
+        loadedFromLobbyState = !cfg.loadLobbyPrefix.empty();
+        loadedFromStage2State = !cfg.loadStage2Prefix.empty();
         for (int c = 0; c < numConsoles; ++c)
         {
-            std::string ssPath = cfg.loadLobbyPrefix + "_inst" + std::to_string(c) + ".mln";
+            std::string ssPath = restorePrefix + "_inst" + std::to_string(c) + ".mln";
             auto ssBytes = ReadBinaryFile(ssPath);
             melonDS::Savestate ss(ssBytes.data(), static_cast<u32>(ssBytes.size()), false);
             if (!consoles[c]->DoSavestate(&ss) || ss.Error)
@@ -1200,10 +1232,10 @@ int main(int argc, char** argv)
     std::array<std::array<u32, 4>, 8> cupTable {};
 
     // Telemetry & milestone tracking
-    bool firstStageRsaPass = isSinglePlayer || isMultiCard || loadedFromLobbyState;
-    bool stage2LaunchPass = isSinglePlayer || isMultiCard || loadedFromLobbyState;
+    bool firstStageRsaPass = isSinglePlayer || isMultiCard || loadedFromLobbyState || loadedFromStage2State;
+    bool stage2LaunchPass = isSinglePlayer || isMultiCard || loadedFromLobbyState || loadedFromStage2State;
     bool nativeJoinPass = isSinglePlayer || loadedFromLobbyState;
-    bool bootDownloadPass = isSinglePlayer || loadedFromLobbyState;
+    bool bootDownloadPass = isSinglePlayer || loadedFromLobbyState || loadedFromStage2State;
     bool lobbySelectionPass = false;
     bool assetTransferPass = false;
     bool raceCountdownPass = false;
@@ -1228,7 +1260,11 @@ int main(int argc, char** argv)
     u8  guestObservedChan = 0;
     int mkdsGuestStableFrames = 0;
     std::vector<int> stationStage1StartFrame(numConsoles, -1);
+    std::vector<int> stage2BootFrame(numConsoles, -1);
     std::vector<int> firmwareDownloadFrames(numConsoles, 0);
+    int stage2LaunchSpreadFrames = 0;
+    u8 hostParticipantMask = 0;
+    s32 activeKartCount = 0;
 
     s32 hostSelectedCourseId = -1;
     s32 hostSetupCourseId = -1;
@@ -1240,6 +1276,7 @@ int main(int argc, char** argv)
     std::vector<int> guestCourseListSnapshot;
     std::vector<int> observedRaceCourseIds;
     u32 minGuestCourseHeapFree = 0xFFFFFFFFu;
+    u32 minGuestExpHeapFree = 0xFFFFFFFFu;
     u32 guestCourseBuf6Size = 0;
     u32 guestCourseBuf7Size = 0;
     int completedRaces = 0;
@@ -1433,11 +1470,20 @@ int main(int argc, char** argv)
 
     Harness_SetPumpGuestsCallback([&]() -> bool {
         melonDS::NDS* savedCur = melonDS::NDS::Current;
-        const u64 leadWindow = 360448ULL + (numConsoles > 2 ? 262144ULL * u64(numConsoles - 2) : 0ULL);
-        const u64 maxLeadSys = consoles[0]->GetSysTimestamp() + leadWindow;
+        const u64 hostSys = consoles[0]->GetSysTimestamp();
+        const u16 aidMask = Harness_GetCurrentAidMask();
         bool progressed = false;
         for (int c = 1; c < numConsoles; ++c)
         {
+            if (Harness_HasGuestReplied(c))
+                continue;
+            const u16 gAid = consoles[c]->Wifi.Read(melonDS::Wifi::W_AIDFull) & 0xFu;
+            const bool expectedReplier = (gAid > 0) && ((aidMask & static_cast<u16>(1u << gAid)) != 0);
+            // Associated peers in aidMask (checked via W_AIDFull because NitroSDK clears W_AIDLow during inter-beacon power-save!)
+            // get up to 360448 SysCycles (~10.75 ms) in 1024-cycle (~30.5 us) steps to wake on PreBeacon, receive Beacon+CMD,
+            // and hit EndRX()/MP_SendReply, stopping the instant Harness_HasGuestReplied(c) turns true;
+            // unassociated peers (W_AIDFull == 0) only catch up to hostSys + 4096 (~122 us).
+            const u64 maxLeadSys = expectedReplier ? (hostSys + 360448ULL) : (hostSys + 4096ULL);
             u64 cur = consoles[c]->GetSysTimestamp();
             if (cur < maxLeadSys)
             {
@@ -1615,15 +1661,17 @@ int main(int argc, char** argv)
                 u32 hdr0 = RamRead32(guest, 0x027ffe00);
                 u16 bootType = RamRead16(guest, 0x027ffc40);
                 u32 connWork = RamRead32(guest, guestSym.data_0217aa00);
-                if (isMultiCard)
+                bool bootedThis = isMultiCard
+                                ? (hdr0 == 0x4952414Du && IsValidMainRamPtr(connWork))
+                                : (hdr0 == 0x4952414Du && bootType == 2 && IsValidMainRamPtr(connWork));
+                if (bootedThis)
                 {
-                    if (hdr0 != 0x4952414Du || !IsValidMainRamPtr(connWork))
-                        allGuestsBooted = false;
+                    if (stage2BootFrame[g] < 0)
+                        stage2BootFrame[g] = frame;
                 }
                 else
                 {
-                    if (hdr0 != 0x4952414Du || bootType != 2 || !IsValidMainRamPtr(connWork))
-                        allGuestsBooted = false;
+                    allGuestsBooted = false;
                 }
             }
             if (allGuestsBooted)
@@ -1632,6 +1680,16 @@ int main(int argc, char** argv)
                 stage2LaunchPass = true;
                 bootDownloadPass = true;
                 Harness_SetStage2Active(true);
+                int minB = frame, maxB = 0;
+                for (int g = 1; g < numConsoles; ++g)
+                {
+                    if (stage2BootFrame[g] >= 0)
+                    {
+                        minB = std::min(minB, stage2BootFrame[g]);
+                        maxB = std::max(maxB, stage2BootFrame[g]);
+                    }
+                }
+                stage2LaunchSpreadFrames = std::max(0, maxB - minB);
                 const auto& guest1 = *consoles[1];
                 guestBootType = RamRead16(guest1, 0x027ffc40);
                 guestHeaderSha256 = Sha256::Hex(&guest1.MainRAM[0x027ffe00 & guest1.MainRAMMask], 0x160);
@@ -1641,10 +1699,27 @@ int main(int argc, char** argv)
                     hofs.write(reinterpret_cast<const char*>(&guest1.MainRAM[0x027ffe00 & guest1.MainRAMMask]), 0x160);
                 }
                 SaveCompositeScreenshot(cfg.outDir + "/01_guest_dlp_booted.png", consoles);
-                logEvent(frame, "Guest Download Play booted MKDS! bootType=" + std::to_string(guestBootType) +
+                logEvent(frame, "All " + std::to_string(numConsoles - 1) +
+                                " Guest(s) booted MKDS! bootType=" + std::to_string(guestBootType) +
+                                " launchSpreadFrames=" + std::to_string(stage2LaunchSpreadFrames) +
                                 " guestHeaderSha256=" + guestHeaderSha256);
                 for (int g = 1; g < numConsoles; ++g)
                     emitPhaseTrace(frame, g, "stage2_launch");
+                if (!cfg.saveStage2Prefix.empty())
+                {
+                    quiesceGuestsAndRun([&]() {
+                        for (int c = 0; c < numConsoles; ++c)
+                        {
+                            melonDS::Savestate ss;
+                            consoles[c]->DoSavestate(&ss);
+                            ss.Finish();
+                            std::string ssPath = cfg.saveStage2Prefix + "_inst" + std::to_string(c) + ".mln";
+                            std::ofstream sofs(ssPath, std::ios::binary);
+                            sofs.write(reinterpret_cast<const char*>(ss.Buffer()), ss.Length());
+                        }
+                    });
+                    logEvent(frame, "Saved synchronized Stage-2 savestates to " + cfg.saveStage2Prefix + "_inst*.mln");
+                }
             }
         }
 
@@ -1751,12 +1826,16 @@ int main(int argc, char** argv)
                     }
                     else
                     {
-                        // Cycle cleanly: tap game banner at (128, 48), wait 40 frames, press A to confirm "Yes"
-                        int phase = (frame - listStartFrame) % 100;
-                        if (phase >= 20 && phase <= 23)
-                            setTouch(g, std::make_pair<u16, u16>(128, 48));
-                        else if (phase >= 60 && phase <= 63)
-                            nextKeys[g] = PressKeys(KEY_A);
+                        // Cycle cleanly with slight per-console tap offset so 7 DS units don't collide on 802.11 Auth/Assoc in the same scanline!
+                        int guestListStart = listStartFrame + (g - 1) * 6;
+                        if (frame >= guestListStart)
+                        {
+                            int phase = (frame - guestListStart) % 100;
+                            if (phase >= 20 && phase <= 23)
+                                setTouch(g, std::make_pair<u16, u16>(128, 48));
+                            else if (phase >= 60 && phase <= 63)
+                                nextKeys[g] = PressKeys(KEY_A);
+                        }
                     }
                 }
                 continue;
@@ -1850,7 +1929,13 @@ int main(int argc, char** argv)
             u32 gKartsP   = RamRead32(guest, guestSym.gKarts);
             if (IsValidMainRamPtr(gRaceProg) && IsValidMainRamPtr(gKartsP))
             {
-                nextKeys[g] = autopilots[g].Step(guest, guestSym);
+                s32 gClk = RamReadS32(guest, gRaceProg + 0x04);
+                s32 gFrames = RamReadS32(guest, gRaceProg + 0x00);
+                // Natural 0.2s per-player reaction spacing at GO! so 8 identical autopilots space cleanly single-file on unguarded tracks
+                if (numConsoles > 2 && gClk != 0 && gFrames >= 0 && gFrames < g * 12)
+                    nextKeys[g] = PressKeys(0);
+                else
+                    nextKeys[g] = autopilots[g].Step(guest, guestSym);
             }
         }
 
@@ -1899,19 +1984,33 @@ int main(int argc, char** argv)
         u32 hConnWork  = RamRead32(host, hostSym.data_0217aa00);
         u32 hRaceSetup = RamRead32(host, hostSym.gRaceSetup);
 
-        // Track Guest heap & course buffer telemetry during MPState 16 / Race
+        // Track Guest heap & course buffer telemetry during MPState 16 / Race across ALL guests 1..N
         if (numConsoles > 1 && bootDownloadPass)
         {
             const auto& guest1 = *consoles[1];
             u32 gConn = RamRead32(guest1, guestSym.data_0217aa00);
-            if (!nativeJoinPass && IsValidMainRamPtr(hConnWork) && IsValidMainRamPtr(gConn))
+            if (!nativeJoinPass && IsValidMainRamPtr(hConnWork))
             {
                 u16 hMpJoin = RamRead16(host, hConnWork + 0x1616);
-                u16 gMpJoin = RamRead16(guest1, gConn + 0x1616);
-                u32 gRomJoin = RamRead32(guest1, guestSym.gRomArchiveTransfer + 0x0c);
-                if (hMpJoin == 15 && gMpJoin == 15 && (isMultiCard || gRomJoin == 2))
+                u8 hPartMask = RamRead8(host, hConnWork + 0x15f6);
+                u8 expectedPartMask = static_cast<u8>((1u << numConsoles) - 1u);
+                bool allGuestsJoined = (hMpJoin == 15) && ((hPartMask & expectedPartMask) == expectedPartMask);
+                for (int g = 1; g < numConsoles && allGuestsJoined; ++g)
+                {
+                    u32 gc = RamRead32(*consoles[g], guestSym.data_0217aa00);
+                    u32 gRomJoin = RamRead32(*consoles[g], guestSym.gRomArchiveTransfer + 0x0c);
+                    u32 gr = RamRead32(*consoles[g], guestSym.data_021759d0);
+                    if (!IsValidMainRamPtr(gc) || RamRead16(*consoles[g], gc + 0x1616) != 15 ||
+                        (!isMultiCard && gRomJoin != 2) ||
+                        (!isMultiCard && (!IsValidMainRamPtr(gr) || (RamRead8(*consoles[g], gr + 0x1c) & 0x04u) == 0)))
+                    {
+                        allGuestsJoined = false;
+                    }
+                }
+                if (allGuestsJoined && IsValidMainRamPtr(gConn))
                 {
                     nativeJoinPass = true;
+                    hostParticipantMask = hPartMask;
                     u32 gRole = RamRead32(guest1, guestSym.data_021759d0);
                     guestDownloadedFlagOk = IsValidMainRamPtr(gRole) && ((RamRead8(guest1, gRole + 0x1c) & 0x04u) != 0);
                     guestSimpleFlagOk     = (RamRead16(guest1, gConn + 0x454) & 0x40u) != 0;
@@ -1921,9 +2020,12 @@ int main(int argc, char** argv)
                     guestObservedTgid     = IsValidMainRamPtr(scanBlk) ? RamRead16(guest1, scanBlk + 0x48)
                                                                        : RamRead16(guest1, 0x027ffc52);
                     guestObservedChan     = RamRead8(guest1, 0x027ffc78);
-                    logEvent(frame, "Native MKDS session & wireless RomArchive joined! hMp=15 gMp=15 gRomSt=2 mUnk_1c_2=" +
-                                    std::to_string(guestDownloadedFlagOk ? 1 : 0) + " simple0x40=" +
-                                    std::to_string(guestSimpleFlagOk ? 1 : 0) + " ggid=" + std::to_string(guestObservedGgid));
+                    logEvent(frame, "Native MKDS session & wireless RomArchive joined across all " +
+                                    std::to_string(numConsoles) + " consoles! participantMask=0x" +
+                                    ([&]() { std::ostringstream o; o << std::hex << int(hostParticipantMask); return o.str(); })() +
+                                    " mUnk_1c_2=" + std::to_string(guestDownloadedFlagOk ? 1 : 0) +
+                                    " simple0x40=" + std::to_string(guestSimpleFlagOk ? 1 : 0) +
+                                    " ggid=" + std::to_string(guestObservedGgid));
                     emitPhaseTrace(frame, 0, "native_join");
                     for (int g = 1; g < numConsoles; ++g)
                         emitPhaseTrace(frame, g, "native_join");
@@ -1936,18 +2038,13 @@ int main(int argc, char** argv)
             if (IsValidMainRamPtr(hConnWork))
             {
                 hostTransmittedCourseId = static_cast<s32>(RamRead16(host, hConnWork + 0x1650));
+                hostParticipantMask = RamRead8(host, hConnWork + 0x15f6);
             }
             if ((frame % 200 == 0) && !inRaceNow)
             {
                 u16 hMp = IsValidMainRamPtr(hConnWork) ? RamRead16(host, hConnWork + 0x1616) : 999;
                 u16 gMp = IsValidMainRamPtr(gConn) ? RamRead16(guest1, gConn + 0x1616) : 999;
                 u32 hMem70 = IsValidMainRamPtr(hMemMenu) ? RamRead32(host, hMemMenu + 0x70) : 999;
-                u8 hPart = IsValidMainRamPtr(hConnWork) ? RamRead8(host, hConnWork + 0x456) : 0;
-                u8 h457  = IsValidMainRamPtr(hConnWork) ? RamRead8(host, hConnWork + 0x457) : 0;
-                u32 hRomSt = RamRead32(host, hostSym.gRomArchiveTransfer + 0x0c);
-                u32 gRomSt = RamRead32(guest1, guestSym.gRomArchiveTransfer + 0x0c);
-                u32 gArcBlk = RamRead32(guest1, guestSym.gRomArchiveTransfer + 0x20);
-                u32 gArcSz  = RamRead32(guest1, guestSym.gRomArchiveTransfer + 0x24);
                 s32 h1e34   = IsValidMainRamPtr(hConnWork) ? RamReadS32(host, hConnWork + 0x1e34) : -1;
                 s32 g1e34   = IsValidMainRamPtr(gConn) ? RamReadS32(guest1, gConn + 0x1e34) : -1;
                 u8 g164f    = IsValidMainRamPtr(gConn) ? RamRead8(guest1, gConn + 0x164f) : 9;
@@ -1966,42 +2063,97 @@ int main(int argc, char** argv)
                 };
                 u64 cs = 0, hr = 0, rs = 0, rr = 0;
                 Harness_GetMPStats(cs, hr, rs, rr);
+                u16 h1d54 = IsValidMainRamPtr(hConnWork) ? RamRead16(host, hConnWork + 0x1d54) : 0;
+                u8  hChCnt = IsValidMainRamPtr(hConnWork) ? RamRead8(host, hConnWork + 0x84) : 0;
+                u8  hChMsk = IsValidMainRamPtr(hConnWork) ? RamRead8(host, hConnWork + 0x87) : 0;
+                std::string peerDiag;
+                for (int g = 1; g < numConsoles; ++g)
+                {
+                    auto& gn = *consoles[g];
+                    u32 gc = RamRead32(gn, guestSym.data_0217aa00);
+                    u16 gAid = gn.Wifi.Read(0x028) & 0x0Fu; // W_AIDLow
+                    u16 gmp = IsValidMainRamPtr(gc) ? RamRead16(gn, gc + 0x1616) : 999;
+                    s32 g1e = IsValidMainRamPtr(gc) ? RamReadS32(gn, gc + 0x1e34) : -1;
+                    s32 gc8 = IsValidMainRamPtr(gc) ? RamReadS32(gn, gc + 0x08) : -1;
+                    peerDiag += " g" + std::to_string(g) + "(a" + std::to_string(gAid) + ":m" +
+                                std::to_string(gmp) + ":s" + std::to_string(g1e) + ":e" + std::to_string(gc8) + ")";
+                }
                 logEvent(frame, "MP_DIAG hMem70=" + std::to_string(hMem70) +
                                 " hMp=" + std::to_string(hMp) + " gMp=" + std::to_string(gMp) +
+                                " ch=" + std::to_string(int(hChCnt)) + "/0x" +
+                                ([&]() { std::ostringstream o; o << std::hex << int(hChMsk) << "/0x" << int(h1d54); return o.str(); })() +
+                                " partMask=" + std::to_string(int(hostParticipantMask)) +
                                 " 1e34=" + std::to_string(h1e34) + "/" + std::to_string(g1e34) +
                                 " gErr=" + std::to_string(g164f) +
                                 " hDs=" + dsShort(host, hDs) + " gDs=" + dsShort(guest1, gDs) +
                                 " mp[cmd=" + std::to_string(cs) + ",hRecv=" + std::to_string(hr) +
-                                ",rSent=" + std::to_string(rs) + ",rRecv=" + std::to_string(rr) + "]");
+                                ",rSent=" + std::to_string(rs) + ",rRecv=" + std::to_string(rr) + "]" + peerDiag);
             }
-            if (bootDownloadPass && guest1.ARM9.R[13] == 0x01ffffe8u)
+            bool anyGuestException = false;
+            for (int g = 1; g < numConsoles; ++g)
             {
-                logEvent(frame, "Guest 1 entered ARM9 exception handler! Halting early for inspection.");
-                break;
-            }
-            u32 gSlots = RamRead32(guest1, guestSym.data_021759c8);
-            if (IsValidMainRamPtr(gSlots))
-            {
-                // Unk021759c8: mBuffers[16] at +0x9b0 (0x0c bytes each), mCourseBufferHeap at +0xa7c
-                u32 courseHeap = RamRead32(guest1, gSlots + 0xa7c);
-                if (IsValidMainRamPtr(courseHeap))
+                const auto& gn = *consoles[g];
+                u32 exPc = IsValidMainRamPtr(guestSym.OSi_ExContext) ? RamRead32(gn, guestSym.OSi_ExContext + 0x40) : 0;
+                if (gn.ARM9.R[13] == 0x01ffffe8u || exPc != 0)
                 {
-                    // NNSiFndHeapHead (0x24 bytes) + NNSiFndFrmHeapHead (mHeadAllocator at +0x24, mTailAllocator at +0x28)
-                    u32 headAlloc = RamRead32(guest1, courseHeap + 0x24);
-                    u32 tailAlloc = RamRead32(guest1, courseHeap + 0x28);
-                    if (IsValidMainRamPtr(headAlloc) && IsValidMainRamPtr(tailAlloc) && tailAlloc >= headAlloc)
+                    firstErrorStr = "guest_" + std::to_string(g) + "_arm9_exception";
+                    logEvent(frame, "Guest " + std::to_string(g) + " entered ARM9 exception handler! Halting early for inspection.");
+                    anyGuestException = true;
+                    break;
+                }
+                u32 gSlots = RamRead32(gn, guestSym.data_021759c8);
+                if (IsValidMainRamPtr(gSlots))
+                {
+                    u32 courseHeap = RamRead32(gn, gSlots + 0xa7c);
+                    if (IsValidMainRamPtr(courseHeap))
                     {
-                        u32 freeBytes = tailAlloc - headAlloc;
-                        if (freeBytes < minGuestCourseHeapFree)
-                            minGuestCourseHeapFree = freeBytes;
+                        u32 headAlloc = RamRead32(gn, courseHeap + 0x24);
+                        u32 tailAlloc = RamRead32(gn, courseHeap + 0x28);
+                        if (IsValidMainRamPtr(headAlloc) && IsValidMainRamPtr(tailAlloc) && tailAlloc >= headAlloc)
+                        {
+                            u32 freeBytes = tailAlloc - headAlloc;
+                            if (freeBytes < minGuestCourseHeapFree)
+                                minGuestCourseHeapFree = freeBytes;
+                        }
+                    }
+                    if (g == 1)
+                    {
+                        u32 buf6Size = RamRead32(gn, gSlots + 0x9b0 + 6 * 0x0c + 0x08) & 0x1FFFFFFFu;
+                        u32 buf7Size = RamRead32(gn, gSlots + 0x9b0 + 7 * 0x0c + 0x08) & 0x1FFFFFFFu;
+                        if (buf6Size > 0) guestCourseBuf6Size = buf6Size;
+                        if (buf7Size > 0) guestCourseBuf7Size = buf7Size;
                     }
                 }
-                // Buffer 6 (.carc) and Buffer 7 (Tex.carc) inside mBuffers (+0x9b0 + idx * 0x0c: mUnk_08 & 0x1FFFFFFF = size)
-                u32 buf6Size = RamRead32(guest1, gSlots + 0x9b0 + 6 * 0x0c + 0x08) & 0x1FFFFFFFu;
-                u32 buf7Size = RamRead32(guest1, gSlots + 0x9b0 + 7 * 0x0c + 0x08) & 0x1FFFFFFFu;
-                if (buf6Size > 0) guestCourseBuf6Size = buf6Size;
-                if (buf7Size > 0) guestCourseBuf7Size = buf7Size;
+                u32 gRPCheck = RamRead32(gn, guestSym.gRaceProgress);
+                u32 gKPCheck = RamRead32(gn, guestSym.gKarts);
+                if (IsValidMainRamPtr(hRaceProg) && IsValidMainRamPtr(hKartsPtr) &&
+                    IsValidMainRamPtr(gRPCheck) && IsValidMainRamPtr(gKPCheck) &&
+                    IsValidMainRamPtr(guestSym.gCurrentHeapCall))
+                {
+                    u32 hc = RamRead32(gn, guestSym.gCurrentHeapCall);
+                    u32 expHeap = (hc != 0) ? Arm9MemRead32(gn, hc + 0x0c) : 0;
+                    if (IsValidMainRamPtr(expHeap))
+                    {
+                        u32 sig = RamRead32(gn, expHeap);
+                        if (sig == 0x45585048u || sig == 0x48505845u)
+                        {
+                            u32 blk = RamRead32(gn, expHeap + 0x24);
+                            u32 totalExpFree = 0;
+                            int guard = 0;
+                            while (IsValidMainRamPtr(blk) && guard < 256)
+                            {
+                                totalExpFree += RamRead32(gn, blk + 0x04);
+                                blk = RamRead32(gn, blk + 0x0c);
+                                guard++;
+                            }
+                            if (totalExpFree < minGuestExpHeapFree)
+                                minGuestExpHeapFree = totalExpFree;
+                        }
+                    }
+                }
             }
+            if (anyGuestException)
+                break;
         }
 
         // Check active race!
@@ -2021,6 +2173,8 @@ int main(int argc, char** argv)
                 inRaceNow = true;
                 sawResultsForCurrentRace = false;
                 raceDoneFrames = 0;
+                if (IsValidMainRamPtr(hostSym.gKartCount))
+                    activeKartCount = RamReadS32(host, hostSym.gKartCount);
                 if (IsValidMainRamPtr(hRaceSetup))
                 {
                     hostSetupCourseId = RamReadS32(host, hRaceSetup + 0x00);
@@ -2032,24 +2186,27 @@ int main(int argc, char** argv)
                             courseListSnapshot.push_back(RamRead8(host, listPtr + k));
                     }
                 }
+                bool courseSyncOk = true;
                 if (!isSinglePlayer && numConsoles > 1)
                 {
-                    u32 gRS = RamRead32(*consoles[1], guestSym.gRaceSetup);
-                    if (IsValidMainRamPtr(gRS))
+                    for (int g = 1; g < numConsoles; ++g)
                     {
-                        s32 gSetupCid = RamReadS32(*consoles[1], gRS + 0x00);
-                        if (gSetupCid > 0) guestReceivedCourseId = gSetupCid;
-                        u32 gListPtr = RamRead32(*consoles[1], gRS + 0x3dc);
-                        if (IsValidMainRamPtr(gListPtr) && guestCourseListSnapshot.empty())
+                        u32 gRS = RamRead32(*consoles[g], guestSym.gRaceSetup);
+                        s32 gCid = IsValidMainRamPtr(gRS) ? RamReadS32(*consoles[g], gRS + 0x00) : -1;
+                        if (g == 1 && gCid > 0)
                         {
-                            for (int k = 0; k < 33; ++k)
-                                guestCourseListSnapshot.push_back(RamRead8(*consoles[1], gListPtr + k));
+                            guestReceivedCourseId = gCid;
+                            u32 gListPtr = RamRead32(*consoles[g], gRS + 0x3dc);
+                            if (IsValidMainRamPtr(gListPtr) && guestCourseListSnapshot.empty())
+                            {
+                                for (int k = 0; k < 33; ++k)
+                                    guestCourseListSnapshot.push_back(RamRead8(*consoles[g], gListPtr + k));
+                            }
                         }
+                        if (gCid != hostSetupCourseId)
+                            courseSyncOk = false;
                     }
                 }
-                bool courseSyncOk = true;
-                if (!isSinglePlayer && guestReceivedCourseId != hostSetupCourseId)
-                    courseSyncOk = false;
                 if (cfg.courseListMode == 0 && !isBattle && completedRaces == 0 &&
                     expectedCourseId > 0 && hostSetupCourseId != static_cast<s32>(expectedCourseId))
                     courseSyncOk = false;
@@ -2057,11 +2214,13 @@ int main(int argc, char** argv)
                 if (courseSyncOk)
                 {
                     assetTransferPass = true;
-                    logEvent(frame, "Race loaded on Host & Guest! setupCourseId=" + std::to_string(hostSetupCourseId) +
-                                    " guestCourseId=" + std::to_string(guestReceivedCourseId) +
+                    logEvent(frame, "Race loaded across all " + std::to_string(numConsoles) +
+                                    " consoles! setupCourseId=" + std::to_string(hostSetupCourseId) +
+                                    " activeKarts=" + std::to_string(activeKartCount) +
                                     " guestBuf6=" + std::to_string(guestCourseBuf6Size) +
                                     " guestBuf7=" + std::to_string(guestCourseBuf7Size) +
-                                    " minGuestCourseHeapFree=" + std::to_string(minGuestCourseHeapFree));
+                                    " minGuestCourseHeapFree=" + std::to_string(minGuestCourseHeapFree) +
+                                    " minGuestExpHeapFree=" + std::to_string(minGuestExpHeapFree));
                     emitPhaseTrace(frame, 0, "MPState16_and_archives");
                     for (int g = 1; g < numConsoles; ++g)
                         emitPhaseTrace(frame, g, "MPState16_and_archives");
@@ -2210,8 +2369,20 @@ int main(int argc, char** argv)
                             if (IsValidMainRamPtr(gRP))
                                 gLap = RamReadS32(*consoles[1], gRP + 0x14 + gEntry * 0x8c + 0x24);
                         }
+                        std::string allLaps = "[";
+                        for (int c = 0; c < numConsoles; ++c)
+                        {
+                            u32 cRS = RamRead32(*consoles[c], (c == 0 ? hostSym : guestSym).gRaceSetup);
+                            u32 cRP = RamRead32(*consoles[c], (c == 0 ? hostSym : guestSym).gRaceProgress);
+                            int cEntry = IsValidMainRamPtr(cRS) ? int(static_cast<std::int8_t>(RamRead8(*consoles[c], cRS + 0x62))) : c;
+                            if (cEntry < 0 || cEntry >= 8) cEntry = c;
+                            s32 cLap = IsValidMainRamPtr(cRP) ? RamReadS32(*consoles[c], cRP + 0x14 + cEntry * 0x8c + 0x24) : -1;
+                            if (c > 0) allLaps += ",";
+                            allLaps += std::to_string(cLap);
+                        }
+                        allLaps += "]";
                         logEvent(frame, "Racing... hostLap=" + std::to_string(hLap) + " hostStatus=" + std::to_string(hStat) +
-                                        " guestLap=" + std::to_string(gLap));
+                                        " guestLap=" + std::to_string(gLap) + " laps=" + allLaps);
                     }
                 }
             }
@@ -2249,9 +2420,11 @@ int main(int argc, char** argv)
                 u16 mpState = IsValidMainRamPtr(hConnWork) ? RamRead16(host, hConnWork + 0x1616) : 0;
                 if (IsValidMainRamPtr(hCupGrid) || mpState == 16 || IsValidMainRamPtr(hMenuSc))
                 {
-                    // Wait until hCupGrid finishes fading in (mState == 3, if Choose mode) so screenshot shows Cup Select ready for Race #2!
-                    bool cupGridReady = IsValidMainRamPtr(hCupGrid) && RamReadS32(host, hCupGrid + 0x30) == 3;
-                    if (cfg.courseListMode != 0 || cupGridReady || (!isBattle && IsValidMainRamPtr(hMenuSc)))
+                    // Wait until hCupGrid finishes fading in (mState == 3, timer == 0 if Choose mode) so screenshot shows Cup Select ready for Race #2!
+                    bool cupGridReady = IsValidMainRamPtr(hCupGrid) &&
+                                        RamReadS32(host, hCupGrid + 0x30) == 3 &&
+                                        RamReadS32(host, hCupGrid + 0x6c) == 0;
+                    if (cfg.courseListMode != 0 || cupGridReady || (isSinglePlayer && IsValidMainRamPtr(hMenuSc)))
                     {
                         nextRaceTransitionPass = true;
                         SaveCompositeScreenshot(cfg.outDir + "/06_next_race_transition.png", consoles);
@@ -2262,7 +2435,7 @@ int main(int argc, char** argv)
                 }
             }
             // Firmware Health & Safety tap on Host (frame 220..280)
-            else if (!loadedFromLobbyState && frame >= 220 && frame < 280 && (frame % 12 < 3))
+            else if (!loadedFromLobbyState && !loadedFromStage2State && frame >= 220 && frame < 280 && (frame % 12 < 3))
             {
                 setTouch(0, std::make_pair<u16, u16>(128, 140));
             }
@@ -2690,6 +2863,10 @@ int main(int argc, char** argv)
              << "  \"guest_course_buf6_size\": " << guestCourseBuf6Size << ",\n"
              << "  \"guest_course_buf7_size\": " << guestCourseBuf7Size << ",\n"
              << "  \"min_guest_course_heap_free\": " << (minGuestCourseHeapFree == 0xFFFFFFFFu ? -1 : static_cast<long long>(minGuestCourseHeapFree)) << ",\n"
+             << "  \"min_guest_exp_heap_free\": " << (minGuestExpHeapFree == 0xFFFFFFFFu ? -1 : static_cast<long long>(minGuestExpHeapFree)) << ",\n"
+             << "  \"stage2_launch_spread_frames\": " << stage2LaunchSpreadFrames << ",\n"
+             << "  \"host_participant_mask\": " << int(hostParticipantMask) << ",\n"
+             << "  \"active_kart_count\": " << activeKartCount << ",\n"
              << "  \"completed_races\": " << completedRaces << ",\n"
              << "  \"frames_elapsed\": " << finalFrame << ",\n"
              << "  \"cups_enabled\": [";

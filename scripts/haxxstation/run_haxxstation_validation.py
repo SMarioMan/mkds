@@ -474,6 +474,101 @@ def main() -> int:
         for fut in as_completed(mfuts):
             regressions[mfuts[fut]] = fut.result()
 
+    # Run 4-Guest (5-player) and 7-Guest (full 8-player maximum!) HaxxStation tests across dedicated CPU cores
+    p8_workers = min(4, max(1, args.workers))
+    full_party_slots = make_cpu_slots(p8_workers)
+    party8_jobs = [
+        (
+            "multi_guest_4_dk_pass",
+            reg_root / "reg_multi_guest_4_dk_pass",
+            [
+                "--mode",
+                "simple-vs",
+                "--guests",
+                "4",
+                "--course-list-mode",
+                "0",
+                "--cup",
+                "2",
+                "--course-in-cup",
+                "0",
+                "--races",
+                "1",
+                "--max-frames",
+                "72000",
+            ],
+        ),
+        (
+            "multi_guest_7_desert_hills",
+            reg_root / "reg_multi_guest_7_desert",
+            [
+                "--mode",
+                "simple-vs",
+                "--guests",
+                "7",
+                "--course-list-mode",
+                "0",
+                "--cup",
+                "1",
+                "--course-in-cup",
+                "0",
+                "--races",
+                "1",
+                "--max-frames",
+                "76000",
+            ],
+        ),
+        (
+            "multi_guest_7_staggered_tap_barrier",
+            reg_root / "reg_multi_guest_7_staggered",
+            [
+                "--mode",
+                "simple-vs",
+                "--guests",
+                "7",
+                "--guest-tap-delay",
+                "60",
+                "--course-list-mode",
+                "0",
+                "--cup",
+                "1",
+                "--course-in-cup",
+                "0",
+                "--races",
+                "1",
+                "--max-frames",
+                "80000",
+            ],
+        ),
+        (
+            "multi_guest_7_rainbow_road",
+            reg_root / "reg_multi_guest_7_rainbow",
+            [
+                "--mode",
+                "simple-vs",
+                "--guests",
+                "7",
+                "--course-list-mode",
+                "0",
+                "--cup",
+                "3",
+                "--course-in-cup",
+                "3",
+                "--races",
+                "1",
+                "--max-frames",
+                "84000",
+            ],
+        ),
+    ]
+    with ThreadPoolExecutor(max_workers=p8_workers) as pool:
+        pfuts = {
+            pool.submit(run_job, mname, mout, margs, full_party_slots, 3600, args.resume): mname
+            for (mname, mout, margs) in party8_jobs
+        }
+        for fut in as_completed(pfuts):
+            regressions[pfuts[fut]] = fut.result()
+
     # Write `reports/haxxstation/course_matrix.csv`
     matrix_csv = REPO_ROOT / "reports" / "haxxstation" / "course_matrix.csv"
     matrix_rows = []
@@ -551,6 +646,9 @@ def main() -> int:
         reg_root / "reg_sequential_vs" / "phase_trace.jsonl",
         reg_root / "reg_random_vs_1" / "phase_trace.jsonl",
         reg_root / "reg_multi_guest_2_staggered" / "phase_trace.jsonl",
+        reg_root / "reg_multi_guest_7_desert" / "phase_trace.jsonl",
+        reg_root / "reg_multi_guest_7_staggered" / "phase_trace.jsonl",
+        reg_root / "reg_multi_guest_7_rainbow" / "phase_trace.jsonl",
     ]
     out_trace = REPO_ROOT / "reports" / "haxxstation" / "phase_trace.jsonl"
     trace_lines: list[str] = []
@@ -570,6 +668,10 @@ def main() -> int:
     reg_req_keys: dict[str, tuple[str, ...]] = {rname: rkeys for (rname, _, _, _, rkeys) in reg_jobs}
     reg_req_keys["multi_guest_2_desert_hills"] = STAGE_KEYS_8
     reg_req_keys["multi_guest_2_staggered_tap_barrier"] = STAGE_KEYS_8
+    reg_req_keys["multi_guest_4_dk_pass"] = STAGE_KEYS_8
+    reg_req_keys["multi_guest_7_desert_hills"] = STAGE_KEYS_8
+    reg_req_keys["multi_guest_7_staggered_tap_barrier"] = STAGE_KEYS_8
+    reg_req_keys["multi_guest_7_rainbow_road"] = STAGE_KEYS_8
 
     reg_pass_map: dict[str, bool] = {}
     for rname, rkeys in reg_req_keys.items():
@@ -592,6 +694,22 @@ def main() -> int:
             )
         elif rname == "single_player_tt_save":
             ok = ok and rs.get("save_file_bytes", 0) > 0 and rs.get("save_non_ff_bytes", 0) > 0
+        elif rname.startswith("multi_guest_7_"):
+            ok = (
+                ok
+                and rs.get("guests") == 7
+                and rs.get("host_participant_mask") == 0xFF
+                and rs.get("active_kart_count") == 8
+                and rs.get("min_guest_course_heap_free", -1) > 0
+                and rs.get("min_guest_exp_heap_free", -1) > 0
+            )
+        elif rname == "multi_guest_4_dk_pass":
+            ok = (
+                ok
+                and rs.get("guests") == 4
+                and (rs.get("host_participant_mask", 0) & 0x1F) == 0x1F
+                and rs.get("min_guest_course_heap_free", -1) > 0
+            )
         reg_pass_map[rname] = ok
 
     reg_pass_count = sum(1 for v in reg_pass_map.values() if v)

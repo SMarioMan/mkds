@@ -14,8 +14,8 @@
 #define HAXXSTATION_MKDS_GGID    0x00000025u
 
 #define HAXXSTATION_MENU_MAX_BYTES  0x1000u
-#define HAXXSTATION_CACHE_PAGE_SIZE 0x4000u
-#define HAXXSTATION_CACHE_SLOTS     8
+#define HAXXSTATION_CACHE_PAGE_SIZE 0x2000u
+#define HAXXSTATION_CACHE_SLOTS     16
 
 typedef enum {
     HS_PHASE_IDLE                    = 0,
@@ -95,8 +95,11 @@ typedef struct HaxxStationHost {
     /* 0x68 */ u32 cacheTick;
     /* 0x6c */ u32 lastError;
     /* 0x70 */ HaxxStationCacheSlot cacheSlots[HAXXSTATION_CACHE_SLOTS];
-    /* 0xd0 */ HaxxStationPeer peers[16];
-    /* 1d0 */ u32 payloadFileWords[18];
+    /* 0x130 */ HaxxStationPeer peers[16];
+    /* 0x230 */ u32 payloadFileWords[18];
+    /* 0x278 */ u16 txMask;
+    /* 0x27a */ u16 txPad;
+    /* 0x27c */ u32 txGenByAid[16];
 } HaxxStationHost;
 
 extern HaxxStationHost gHaxxStationHost;
